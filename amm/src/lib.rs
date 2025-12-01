@@ -14,7 +14,11 @@ use jupiter_amm_interface::{
     try_get_account_data,
 };
 use anyhow::Result;
-use solana_sdk::{ instruction::AccountMeta, system_program::ID as SystemProgramId };
+use solana_sdk::{
+    instruction::AccountMeta,
+    system_program::ID as SystemProgramId,
+    sysvar::instructions::BorrowedAccountMeta,
+};
 use solana_pubkey::Pubkey;
 use rust_decimal::Decimal;
 
@@ -62,10 +66,8 @@ pub struct BankinecoSwapAction {
     yielding_mint_program: Pubkey,
 }
 
-impl TryFrom<BankinecoSwapAction> for Vec<AccountMeta> {
-    type Error = anyhow::Error;
-
-    fn try_from(accounts: BankinecoSwapAction) -> Result<Self> {
+impl BankinecoSwapAction {
+    fn to_account_metas(accounts: Self, is_mint: bool) -> Result<Vec<AccountMeta>> {
         let yielding_user_ta = get_associated_token_address(
             &accounts.user,
             &accounts.yielding_mint
@@ -77,7 +79,7 @@ impl TryFrom<BankinecoSwapAction> for Vec<AccountMeta> {
         );
         let fee_team_ta = get_associated_token_address(&accounts.team, &accounts.yielding_mint);
 
-        let account_metas = vec![
+        let mut account_metas = vec![
             AccountMeta::new(accounts.user, true),
             AccountMeta::new(accounts.bank, false),
             AccountMeta::new(accounts.vault, false),
@@ -94,6 +96,28 @@ impl TryFrom<BankinecoSwapAction> for Vec<AccountMeta> {
             AccountMeta::new_readonly(accounts.yielding_mint_program, false),
             AccountMeta::new_readonly(anchor_spl::associated_token::ID, false)
         ];
+
+        // Remaining accounts
+        if accounts.vault.eq(&MAIN_USDC_VAULT) {
+            account_metas.extend_from_slice(
+                &[
+                    AccountMeta::new_readonly(MARGINFI_PROGRAM_ID, false),
+                    AccountMeta::new_readonly(MAIN_MARGINFI_GROUP, false),
+                    AccountMeta::new(MAIN_MARGINFI_ACCOUNT, false),
+                    AccountMeta::new(MAIN_MARGINFI_BANK, false),
+                    AccountMeta::new(MAIN_MARGINFI_LIQUIDITY_VAULT, false),
+                ]
+            );
+
+            if !is_mint {
+                account_metas.extend_from_slice(
+                    &[
+                        AccountMeta::new_readonly(MAIN_MARGINFI_BANK, false),
+                        AccountMeta::new_readonly(MAIN_MARGINFI_ORACLE, false),
+                    ]
+                );
+            }
+        }
 
         Ok(account_metas)
     }
@@ -259,16 +283,19 @@ impl Amm for BankinecoAmm {
 
         Ok(SwapAndAccountMetas {
             swap: Swap::TokenSwap,
-            account_metas: (BankinecoSwapAction {
-                user: *user,
-                bank: self.bank,
-                vault: self.vault,
-                oracle: self.oracle,
-                yielding_mint: *yielding_mint,
-                bank_mint: *bank_mint,
-                team: self.team,
-                yielding_mint_program: self.yielding_mint_program,
-            }).try_into()?,
+            account_metas: BankinecoSwapAction::to_account_metas(
+                BankinecoSwapAction {
+                    user: *user,
+                    bank: self.bank,
+                    vault: self.vault,
+                    oracle: self.oracle,
+                    yielding_mint: *yielding_mint,
+                    bank_mint: *bank_mint,
+                    team: self.team,
+                    yielding_mint_program: self.yielding_mint_program,
+                },
+                is_mint
+            )?,
         })
     }
 
