@@ -83,7 +83,7 @@ impl BankinecoSwapAction {
             AccountMeta::new(accounts.user, true),
             AccountMeta::new(accounts.bank, false),
             AccountMeta::new(accounts.vault, false),
-            AccountMeta::new_readonly(accounts.oracle, false),
+            AccountMeta::new(accounts.oracle, false),
             AccountMeta::new(accounts.yielding_mint, false),
             AccountMeta::new(accounts.bank_mint, false),
             AccountMeta::new(yielding_user_ta, false),
