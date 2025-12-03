@@ -105,9 +105,16 @@ impl BankinecoSwapAction {
                     AccountMeta::new_readonly(MAIN_MARGINFI_GROUP, false),
                     AccountMeta::new(MAIN_MARGINFI_ACCOUNT, false),
                     AccountMeta::new(MAIN_MARGINFI_BANK, false),
-                    AccountMeta::new(MAIN_MARGINFI_LIQUIDITY_VAULT, false),
                 ]
             );
+
+            if !is_mint {
+                account_metas.push(
+                    AccountMeta::new_readonly(MAIN_MARGINFI_LIQUIDITY_VAULT_AUTH, false)
+                );
+            }
+
+            account_metas.push(AccountMeta::new(MAIN_MARGINFI_LIQUIDITY_VAULT, false));
 
             if !is_mint {
                 account_metas.extend_from_slice(

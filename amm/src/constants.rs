@@ -14,4 +14,7 @@ pub const MAIN_MARGINFI_BANK: Pubkey = pubkey!("2s37akK2eyBbp8DZgCm7RtsaEz8eJP3N
 pub const MAIN_MARGINFI_LIQUIDITY_VAULT: Pubkey = pubkey!(
     "7jaiZR5Sk8hdYN9MxTpczTcwbWpb5WEoxSANuUwveuat"
 );
+pub const MAIN_MARGINFI_LIQUIDITY_VAULT_AUTH: Pubkey = pubkey!(
+    "3uxNepDbmkDNq6JhRja5Z8QwbTrfmkKP8AKZV5chYDGG"
+);
 pub const MAIN_MARGINFI_ORACLE: Pubkey = pubkey!("Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX");
