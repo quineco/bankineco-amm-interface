@@ -80,7 +80,7 @@ impl BankinecoSwapAction {
         let fee_team_ta = get_associated_token_address(&accounts.team, &accounts.yielding_mint);
 
         let mut account_metas = vec![
-            AccountMeta::new(accounts.user, true),
+            AccountMeta::new_readonly(accounts.user, true),
             AccountMeta::new(accounts.bank, false),
             AccountMeta::new(accounts.vault, false),
             AccountMeta::new_readonly(accounts.oracle, false),
