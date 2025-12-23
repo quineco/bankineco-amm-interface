@@ -102,7 +102,7 @@ impl BankinecoSwapAction {
             account_metas.extend_from_slice(
                 &[
                     AccountMeta::new_readonly(MARGINFI_PROGRAM_ID, false),
-                    AccountMeta::new_readonly(MAIN_MARGINFI_GROUP, false),
+                    AccountMeta::new(MAIN_MARGINFI_GROUP, false),
                     AccountMeta::new(MAIN_MARGINFI_ACCOUNT, false),
                     AccountMeta::new(MAIN_MARGINFI_BANK, false),
                 ]
