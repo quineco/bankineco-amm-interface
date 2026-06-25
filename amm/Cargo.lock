@@ -93,11 +93,12 @@ version = "0.1.0"
 dependencies = [
  "anchor-spl",
  "anyhow",
- "bankineco-helpers",
+ "bytemuck",
  "jupiter-amm-interface",
  "rust_decimal",
  "solana-pubkey",
  "solana-sdk",
+ "vault-sdk",
 ]
 
 [[package]]
@@ -461,16 +462,6 @@ name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
-
-[[package]]
-name = "bankineco-helpers"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42bd4f3f4fd1e40ed7149b126cc0c5b8dfc1744df46ca65990a25eb67c699765"
-dependencies = [
- "bytemuck",
- "bytemuck_derive",
-]
 
 [[package]]
 name = "base64"
@@ -4194,6 +4185,16 @@ checksum = "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "vault-sdk"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94fbcd256e4d0d0e136b3b671f7f9aa49853cb0a66a697c6c2a61db0c026eb1f"
+dependencies = [
+ "bytemuck",
+ "bytemuck_derive",
 ]
 
 [[package]]
