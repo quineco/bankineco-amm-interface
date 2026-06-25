@@ -17,10 +17,16 @@ use anyhow::Result;
 use solana_sdk::instruction::AccountMeta;
 use solana_sdk::system_program::ID as SystemProgramId;
 use solana_pubkey::Pubkey;
-use rust_decimal::Decimal;
 
 pub mod constants;
+pub mod holdings;
+pub mod marginfi;
+pub mod math;
+
 use constants::*;
+use holdings::{find_base_holding, base_holding_for_mint, holding_mints};
+use marginfi::{marginfi_position_from_vault, marginfi_withdraw_remaining_accounts};
+use math::{calc_out_amount, required_input_amount};
 
 #[derive(Copy, Clone)]
 pub struct BankinecoAmm {
@@ -42,201 +48,6 @@ impl BankinecoAmm {
         let marginfi_position = marginfi_position_from_vault(&vault_state);
         Self { vault, vault_state, share_mint, base_asset_mint, base_asset_decimals, marginfi_position }
     }
-}
-
-fn find_base_holding(vault: &Vault) -> Option<(Pubkey, u8)> {
-    vault.holdings
-        .iter()
-        .find(|h| h.is_base == 1 && h.mint != [0u8; 32])
-        .map(|h| (Pubkey::from(h.mint), h.decimals))
-}
-
-/// Returns `(price, decimals)` for the base holding matching `mint`, if any.
-fn base_holding_for_mint(vault: &Vault, mint: &Pubkey) -> Option<(u64, u8)> {
-    vault.holdings
-        .iter()
-        .find(|h| h.is_base == 1 && &Pubkey::from(h.mint) == mint)
-        .map(|h| (h.price, h.decimals))
-}
-
-/// All base-asset holding mints — the vault's whitelisted deposit assets.
-fn holding_mints(vault: &Vault) -> Vec<Pubkey> {
-    vault.holdings
-        .iter()
-        .filter(|h| h.is_base == 1 && h.mint != [0u8; 32])
-        .map(|h| Pubkey::from(h.mint))
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Marginfi external liquidity helpers
-// ---------------------------------------------------------------------------
-
-/// Scan the vault's external_liquidity slots for a Marginfi position.
-///
-/// Returns `(marginfi_user_account, slot_index)` for the first active slot,
-/// or `None` if the vault has no Marginfi liquidity deployed.
-///
-/// Assumes at most one Marginfi position per vault (takes the first matching slot).
-///
-/// Layout of `MarginfiExternalLiquidityData` (common::state::external_liquidity):
-///   [0]      source discriminant (1 = Marginfi)
-///   [1..8]   _padding1 (7 bytes)
-///   [8..40]  user_account (Pubkey, 32 bytes)
-fn marginfi_position_from_vault(vault: &Vault) -> Option<(Pubkey, u8)> {
-    vault.external_liquidity
-        .iter()
-        .enumerate()
-        .find(|(_, slot)| slot.data[0] == 1) // ExternalLiquiditySource::Marginfi
-        .and_then(|(i, slot)| {
-            let bytes: [u8; 32] = slot.data[8..40].try_into().ok()?;
-            let pk = Pubkey::from(bytes);
-            if pk == Pubkey::default() { None } else { Some((pk, i as u8)) }
-        })
-}
-
-/// Encode a slice as a borsh `Vec<u8>`: u32 LE length prefix followed by bytes.
-fn borsh_vec(v: &[u8], out: &mut Vec<u8>) {
-    out.extend_from_slice(&(v.len() as u32).to_le_bytes());
-    out.extend_from_slice(v);
-}
-
-/// Build the serialized `InstructionRefs` bytes for a single Marginfi withdraw CPI.
-///
-/// This is passed as part of the `execute_withdraw` instruction data alongside
-/// `external_liquidity_source` (the slot index). The vault program then uses it
-/// to invoke the Marginfi `lending_account_withdraw` CPI via `CpiDispatcher`.
-///
-/// Wire format (`InstructionRefs` → `CpiRefs` → `CpiMapping`, all borsh):
-///   CpiMapping.indices  : [0,1,2,3,4,5,6,7,8]  — 9 remaining_accounts in order
-///   CpiMapping.lengths  : [9]                   — one CPI, 9 accounts
-///   CpiRefs.types       : [3]                   — CpiType::MARGINFI_WITHDRAW
-///   CpiRefs.args        : [0xFF, 0xFF]           — Skip sentinel; amount computed on-chain
-///   InstructionRefs.tracked: []
-///
-/// References:
-///   bankineco/rust/crates/common/src/accounts/refs.rs        (InstructionRefs)
-///   bankineco/rust/crates/common/src/cpi/refs.rs             (CpiRefs)
-///   bankineco/rust/crates/common/src/accounts/cpi.rs         (CpiMapping)
-///   bankineco/rust/crates/common/src/cpi/registry.rs         (CpiType::MARGINFI_WITHDRAW = 3)
-pub fn build_marginfi_withdraw_instruction_refs() -> Vec<u8> {
-    let mut out = Vec::with_capacity(33);
-    borsh_vec(&[0, 1, 2, 3, 4, 5, 6, 7, 8], &mut out); // CpiMapping.indices
-    borsh_vec(&[9], &mut out);                           // CpiMapping.lengths
-    borsh_vec(&[3], &mut out);                           // CpiRefs.types (MARGINFI_WITHDRAW)
-    borsh_vec(&[0xFF, 0xFF], &mut out);                  // CpiRefs.args  (Skip sentinel)
-    borsh_vec(&[], &mut out);                            // InstructionRefs.tracked
-    out
-}
-
-/// Build the remaining `AccountMeta`s that the vault program passes through to
-/// the Marginfi CPI inside `execute_withdraw`.
-///
-/// These are appended after the fixed `execute_withdraw` accounts.
-/// The account order matches the `CpiMapping.indices` built by
-/// [`build_marginfi_withdraw_instruction_refs`]:
-///
-///   [0] Marginfi program              (readonly)
-///   [1] marginfi_group                (writable)
-///   [2] marginfi_account              (writable)  ← vault's Marginfi user account
-///   [3] vault PDA                     (readonly)  ← signing authority (PDA-signs internally)
-///   [4] bank                          (writable)  ← mint-specific Marginfi bank
-///   [5] vault_asset_ata               (writable)  ← withdrawal destination
-///   [6] bank_liquidity_vault_auth     (readonly)  ← mint-specific
-///   [7] bank_liquidity_vault          (writable)  ← mint-specific
-///   [8] token_program                 (readonly)
-///
-/// Validation by `validate_external_withdraw_refs` in execute_withdraw.rs:
-///   accounts[3].key == vault_key          (signer authority)
-///   accounts[5].key == vault_asset_ata    (destination)
-pub fn marginfi_withdraw_remaining_accounts(
-    marginfi_account: Pubkey,
-    vault: Pubkey,
-    vault_asset_ata: Pubkey,
-    mint_config: &constants::MarginfiMintConfig,
-) -> Vec<AccountMeta> {
-    vec![
-        AccountMeta::new_readonly(MARGINFI_PROGRAM_ID, false),
-        AccountMeta::new(MAIN_MARGINFI_GROUP, false),
-        AccountMeta::new(marginfi_account, false),
-        AccountMeta::new_readonly(vault, false),
-        AccountMeta::new(mint_config.bank, false),
-        AccountMeta::new(vault_asset_ata, false),
-        AccountMeta::new_readonly(mint_config.liquidity_vault_auth, false),
-        AccountMeta::new(mint_config.liquidity_vault, false),
-        AccountMeta::new_readonly(anchor_spl::token::ID, false),
-    ]
-}
-
-/// Calculate the output amount and fee for a swap.
-///
-/// `is_deposit = true`  → base asset in, share tokens out (execute_deposit)
-/// `is_deposit = false` → share tokens in, base asset out (execute_withdraw)
-///
-/// Prices are 6-decimal fixed-point in the vault's accounting unit. Amounts
-/// are in native token units (applying the respective token's decimal scale).
-pub fn calc_out_amount(
-    is_deposit: bool,
-    in_amount: u64,
-    share_price: u64,
-    share_decimals: u8,
-    asset_price: u64,
-    asset_decimals: u8,
-    fee_bps: u16,
-) -> Option<(u64, u64)> {
-    const BPS: u128 = 10_000;
-    let fee_bps = fee_bps as u128;
-
-    let (price_in, dec_in, price_out, dec_out) = if is_deposit {
-        (asset_price as u128, asset_decimals, share_price as u128, share_decimals)
-    } else {
-        (share_price as u128, share_decimals, asset_price as u128, asset_decimals)
-    };
-
-    // out_gross = in * price_in * 10^dec_out / (price_out * 10^dec_in)
-    let numerator = (in_amount as u128)
-        .checked_mul(price_in)?
-        .checked_mul(10u128.pow(dec_out as u32))?;
-    let denominator = price_out.checked_mul(10u128.pow(dec_in as u32))?;
-    let out_gross = numerator.checked_div(denominator)?;
-
-    let fee = out_gross * fee_bps / BPS;
-    let out_net = out_gross.checked_sub(fee)?;
-
-    Some((out_net.try_into().ok()?, fee.try_into().ok()?))
-}
-
-/// Calculate the required input for an exact-output swap (ceiling division).
-pub fn required_input_amount(
-    is_deposit: bool,
-    desired_out: u64,
-    share_price: u64,
-    share_decimals: u8,
-    asset_price: u64,
-    asset_decimals: u8,
-    fee_bps: u16,
-) -> u128 {
-    const BPS: u128 = 10_000;
-    let fee_bps = fee_bps as u128;
-    let effective_bps = BPS.checked_sub(fee_bps).expect("fee_bps must be <= 10_000");
-
-    let (price_in, dec_in, price_out, dec_out) = if is_deposit {
-        (asset_price as u128, asset_decimals, share_price as u128, share_decimals)
-    } else {
-        (share_price as u128, share_decimals, asset_price as u128, asset_decimals)
-    };
-
-    // in = ceil(desired_out * price_out * 10^dec_in * BPS / (price_in * 10^dec_out * effective_bps))
-    let numerator = (desired_out as u128)
-        .checked_mul(price_out).expect("overflow")
-        .checked_mul(10u128.pow(dec_in as u32)).expect("overflow")
-        .checked_mul(BPS).expect("overflow");
-
-    let denominator = price_in
-        .checked_mul(10u128.pow(dec_out as u32)).expect("overflow")
-        .checked_mul(effective_bps).expect("overflow");
-
-    (numerator + denominator - 1) / denominator
 }
 
 impl Amm for BankinecoAmm {
@@ -339,7 +150,7 @@ impl Amm for BankinecoAmm {
             out_amount,
             fee_amount,
             fee_mint,
-            fee_pct: Decimal::new(fee_bps.into(), 4),
+            fee_pct: rust_decimal::Decimal::new(fee_bps.into(), 4),
         })
     }
 
@@ -405,11 +216,14 @@ impl Amm for BankinecoAmm {
             AccountMeta::new_readonly(SystemProgramId, false),
         ]);
 
-        // For withdrawals with external liquidity, append the 9 Marginfi
-        // remaining_accounts and note the instruction data that Jupiter must encode.
-        // When there is no external liquidity position, neither the extra accounts
-        // nor the CPI refs are included — execute_withdraw receives (None, None).
-        if !is_deposit {
+        // For withdrawals, always call execute_withdraw_from_external.
+        // When the vault has a Marginfi position, append the 9 remaining_accounts
+        // and pass the slot index as in_index so Jupiter can encode:
+        //   external_withdraw_ix_refs : Some(build_marginfi_withdraw_instruction_refs())
+        //   external_liquidity_source : Some(slot_index)
+        // When there is no external liquidity, no extra accounts are appended and
+        // Jupiter encodes (None, None); in_index is set to u8::MAX as a sentinel.
+        let external_liquidity_source: u8 = if !is_deposit {
             if let Some((marginfi_account, slot_index)) = self.marginfi_position {
                 if let Some(mint_config) = constants::marginfi_config_for_mint(asset_mint) {
                     account_metas.extend(marginfi_withdraw_remaining_accounts(
@@ -419,18 +233,25 @@ impl Amm for BankinecoAmm {
                         mint_config,
                     ));
                 }
-
-                // Jupiter must also encode in the execute_withdraw instruction data:
-                //   external_withdraw_ix_refs : Some(build_marginfi_withdraw_instruction_refs())
-                //   external_liquidity_source : Some(slot_index)
-                // where slot_index is the vault's external_liquidity array index.
-                // See: bankineco/rust/programs/vault/src/instructions/vault/permissionless/execute_withdraw.rs
-                let _ = slot_index;
+                slot_index
+            } else {
+                u8::MAX
             }
-        }
+        } else {
+            0
+        };
+
+        // TODO: Jupiter needs new Swap variants for the Bankineco vault:
+        //   - BankinecoDeposit: execute_deposit no longer takes an out_amount argument.
+        //   - BankinecoWithdrawFromExternal { external_liquidity_source: u8 }: calls
+        //     execute_withdraw_from_external; external_liquidity_source is the vault's
+        //     external_liquidity slot index (u8::MAX = no external position → None, None).
+        // Using TokenSwap as a placeholder until those variants are added.
+        let swap = Swap::TokenSwap;
+        let _ = external_liquidity_source;
 
         Ok(SwapAndAccountMetas {
-            swap: Swap::TokenSwap,
+            swap,
             account_metas,
         })
     }
