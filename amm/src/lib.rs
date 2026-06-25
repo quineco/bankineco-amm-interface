@@ -12,8 +12,10 @@ use jupiter_amm_interface::{
     SwapParams,
     try_get_account_data,
 };
+use anchor_spl::associated_token::get_associated_token_address;
 use anyhow::Result;
 use solana_sdk::instruction::AccountMeta;
+use solana_sdk::system_program::ID as SystemProgramId;
 use solana_pubkey::Pubkey;
 use rust_decimal::Decimal;
 
@@ -237,12 +239,74 @@ impl Amm for BankinecoAmm {
     }
 
     fn get_swap_and_account_metas(&self, swap_params: &SwapParams) -> Result<SwapAndAccountMetas> {
-        let SwapParams { source_mint, .. } = swap_params;
-        let is_deposit = !source_mint.eq(&self.share_mint);
+        let SwapParams { source_mint, destination_mint, token_transfer_authority, .. } =
+            swap_params;
 
-        // TODO: fill in execute_deposit / execute_withdraw account metas
-        let _ = is_deposit;
-        let account_metas: Vec<AccountMeta> = vec![];
+        let is_deposit = !source_mint.eq(&self.share_mint);
+        let asset_mint = if is_deposit { source_mint } else { destination_mint };
+        let user = token_transfer_authority;
+
+        // PDAs — seeds from the vault program (common crate):
+        //   vault_oracle : ["vault_oracle", vault]      (common::state::oracle::VAULT_ORACLE_SEED)
+        //   fee_vault    : ["VFEEVAULT",    vault]      (common::state::vault::FEE_VAULT_SEED)
+        let vault_oracle = Pubkey::find_program_address(
+            &[b"vault_oracle", self.vault.as_ref()],
+            &PROGRAM_ID,
+        ).0;
+        let fee_vault = Pubkey::find_program_address(
+            &[b"VFEEVAULT", self.vault.as_ref()],
+            &PROGRAM_ID,
+        ).0;
+
+        // ATAs
+        let user_asset_ata = get_associated_token_address(user, asset_mint);
+        let vault_asset_ata = get_associated_token_address(&self.vault, asset_mint);
+        let fee_vault_ata = get_associated_token_address(&fee_vault, asset_mint);
+        let user_share_ata = get_associated_token_address(user, &self.share_mint);
+
+        // Account order mirrors ExecuteDeposit / ExecuteWithdraw in the vault program:
+        //   rust/programs/vault/src/instructions/vault/permissionless/execute_deposit.rs
+        //   rust/programs/vault/src/instructions/vault/permissionless/execute_withdraw.rs
+        let vault_tranche_state = if self.vault_state.tranching_enabled == 1 {
+            Some(
+                Pubkey::find_program_address(
+                    &[b"vault_tranche", self.vault.as_ref()],
+                    &PROGRAM_ID,
+                ).0,
+            )
+        } else {
+            None
+        };
+
+        let mut account_metas = vec![
+            AccountMeta::new(*user, true),
+            AccountMeta::new(self.vault, false),
+            AccountMeta::new_readonly(vault_oracle, false),
+        ];
+        if let Some(tranche_state) = vault_tranche_state {
+            account_metas.push(AccountMeta::new_readonly(tranche_state, false));
+        }
+        account_metas.extend_from_slice(&[
+            AccountMeta::new_readonly(*asset_mint, false),
+            AccountMeta::new(self.share_mint, false),
+            AccountMeta::new(user_asset_ata, false),
+            AccountMeta::new(vault_asset_ata, false),
+            AccountMeta::new(fee_vault, false),
+            AccountMeta::new(fee_vault_ata, false),
+            AccountMeta::new(user_share_ata, false),
+            AccountMeta::new_readonly(anchor_spl::token::ID, false),       // asset_token_program
+            AccountMeta::new_readonly(anchor_spl::token::ID, false),       // share_token_program
+            AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
+            AccountMeta::new_readonly(SystemProgramId, false),
+        ]);
+
+        // TODO: for execute_withdraw, the instruction data must include
+        //   `external_withdraw_ix_refs: Option<InstructionRefs>` and
+        //   `external_liquidity_source: Option<u8>` when the vault has external
+        //   liquidity (e.g. Marginfi). See:
+        //   bankineco/rust/programs/vault/src/instructions/vault/permissionless/execute_withdraw.rs
+        //   bankineco/rust/crates/common/src/accounts/refs.rs  (InstructionRefs layout)
+        //   Pass `(None, None)` for vaults with no external liquidity deployed.
 
         Ok(SwapAndAccountMetas {
             swap: Swap::TokenSwap,
