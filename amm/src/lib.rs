@@ -77,6 +77,8 @@ fn holding_mints(vault: &Vault) -> Vec<Pubkey> {
 /// Returns `(marginfi_user_account, slot_index)` for the first active slot,
 /// or `None` if the vault has no Marginfi liquidity deployed.
 ///
+/// Assumes at most one Marginfi position per vault (takes the first matching slot).
+///
 /// Layout of `MarginfiExternalLiquidityData` (common::state::external_liquidity):
 ///   [0]      source discriminant (1 = Marginfi)
 ///   [1..8]   _padding1 (7 bytes)
@@ -138,10 +140,10 @@ pub fn build_marginfi_withdraw_instruction_refs() -> Vec<u8> {
 ///   [1] marginfi_group                (writable)
 ///   [2] marginfi_account              (writable)  ← vault's Marginfi user account
 ///   [3] vault PDA                     (readonly)  ← signing authority (PDA-signs internally)
-///   [4] bank                          (writable)
+///   [4] bank                          (writable)  ← mint-specific Marginfi bank
 ///   [5] vault_asset_ata               (writable)  ← withdrawal destination
-///   [6] bank_liquidity_vault_auth     (readonly)
-///   [7] bank_liquidity_vault          (writable)
+///   [6] bank_liquidity_vault_auth     (readonly)  ← mint-specific
+///   [7] bank_liquidity_vault          (writable)  ← mint-specific
 ///   [8] token_program                 (readonly)
 ///
 /// Validation by `validate_external_withdraw_refs` in execute_withdraw.rs:
@@ -151,16 +153,17 @@ pub fn marginfi_withdraw_remaining_accounts(
     marginfi_account: Pubkey,
     vault: Pubkey,
     vault_asset_ata: Pubkey,
+    mint_config: &constants::MarginfiMintConfig,
 ) -> Vec<AccountMeta> {
     vec![
         AccountMeta::new_readonly(MARGINFI_PROGRAM_ID, false),
         AccountMeta::new(MAIN_MARGINFI_GROUP, false),
         AccountMeta::new(marginfi_account, false),
         AccountMeta::new_readonly(vault, false),
-        AccountMeta::new(MAIN_MARGINFI_BANK, false),
+        AccountMeta::new(mint_config.bank, false),
         AccountMeta::new(vault_asset_ata, false),
-        AccountMeta::new_readonly(MAIN_MARGINFI_LIQUIDITY_VAULT_AUTH, false),
-        AccountMeta::new(MAIN_MARGINFI_LIQUIDITY_VAULT, false),
+        AccountMeta::new_readonly(mint_config.liquidity_vault_auth, false),
+        AccountMeta::new(mint_config.liquidity_vault, false),
         AccountMeta::new_readonly(anchor_spl::token::ID, false),
     ]
 }
@@ -402,22 +405,27 @@ impl Amm for BankinecoAmm {
             AccountMeta::new_readonly(SystemProgramId, false),
         ]);
 
-        // For withdrawals, append Marginfi remaining_accounts when the vault has
-        // external liquidity deployed. The vault program reads these via
-        // `ctx.remaining_accounts` and passes them to the CpiDispatcher.
-        //
-        // The instruction data for execute_withdraw must also include:
-        //   external_withdraw_ix_refs : Some(InstructionRefs)  ← build_marginfi_withdraw_instruction_refs()
-        //   external_liquidity_source : Some(slot_index)       ← marginfi_position.1
-        // Jupiter is responsible for encoding these into the instruction data alongside
-        // the share_amount argument (see execute_withdraw.rs for the full signature).
+        // For withdrawals with external liquidity, append the 9 Marginfi
+        // remaining_accounts and note the instruction data that Jupiter must encode.
+        // When there is no external liquidity position, neither the extra accounts
+        // nor the CPI refs are included — execute_withdraw receives (None, None).
         if !is_deposit {
-            if let Some((marginfi_account, _slot_index)) = self.marginfi_position {
-                account_metas.extend(marginfi_withdraw_remaining_accounts(
-                    marginfi_account,
-                    self.vault,
-                    vault_asset_ata,
-                ));
+            if let Some((marginfi_account, slot_index)) = self.marginfi_position {
+                if let Some(mint_config) = constants::marginfi_config_for_mint(asset_mint) {
+                    account_metas.extend(marginfi_withdraw_remaining_accounts(
+                        marginfi_account,
+                        self.vault,
+                        vault_asset_ata,
+                        mint_config,
+                    ));
+                }
+
+                // Jupiter must also encode in the execute_withdraw instruction data:
+                //   external_withdraw_ix_refs : Some(build_marginfi_withdraw_instruction_refs())
+                //   external_liquidity_source : Some(slot_index)
+                // where slot_index is the vault's external_liquidity array index.
+                // See: bankineco/rust/programs/vault/src/instructions/vault/permissionless/execute_withdraw.rs
+                let _ = slot_index;
             }
         }
 
