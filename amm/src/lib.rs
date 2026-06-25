@@ -29,6 +29,9 @@ pub struct BankinecoAmm {
     share_mint: Pubkey,
     base_asset_mint: Pubkey,
     base_asset_decimals: u8,
+    /// Vault's Marginfi user account and the external_liquidity slot index it
+    /// occupies, if the vault has Marginfi external liquidity deployed.
+    marginfi_position: Option<(Pubkey, u8)>,
 }
 
 impl BankinecoAmm {
@@ -36,7 +39,8 @@ impl BankinecoAmm {
         let share_mint = Pubkey::from(vault_state.mint);
         let (base_asset_mint, base_asset_decimals) =
             find_base_holding(&vault_state).unwrap_or((USDC_MINT, 6));
-        Self { vault, vault_state, share_mint, base_asset_mint, base_asset_decimals }
+        let marginfi_position = marginfi_position_from_vault(&vault_state);
+        Self { vault, vault_state, share_mint, base_asset_mint, base_asset_decimals, marginfi_position }
     }
 }
 
@@ -62,6 +66,103 @@ fn holding_mints(vault: &Vault) -> Vec<Pubkey> {
         .filter(|h| h.is_base == 1 && h.mint != [0u8; 32])
         .map(|h| Pubkey::from(h.mint))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Marginfi external liquidity helpers
+// ---------------------------------------------------------------------------
+
+/// Scan the vault's external_liquidity slots for a Marginfi position.
+///
+/// Returns `(marginfi_user_account, slot_index)` for the first active slot,
+/// or `None` if the vault has no Marginfi liquidity deployed.
+///
+/// Layout of `MarginfiExternalLiquidityData` (common::state::external_liquidity):
+///   [0]      source discriminant (1 = Marginfi)
+///   [1..8]   _padding1 (7 bytes)
+///   [8..40]  user_account (Pubkey, 32 bytes)
+fn marginfi_position_from_vault(vault: &Vault) -> Option<(Pubkey, u8)> {
+    vault.external_liquidity
+        .iter()
+        .enumerate()
+        .find(|(_, slot)| slot.data[0] == 1) // ExternalLiquiditySource::Marginfi
+        .and_then(|(i, slot)| {
+            let bytes: [u8; 32] = slot.data[8..40].try_into().ok()?;
+            let pk = Pubkey::from(bytes);
+            if pk == Pubkey::default() { None } else { Some((pk, i as u8)) }
+        })
+}
+
+/// Encode a slice as a borsh `Vec<u8>`: u32 LE length prefix followed by bytes.
+fn borsh_vec(v: &[u8], out: &mut Vec<u8>) {
+    out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+    out.extend_from_slice(v);
+}
+
+/// Build the serialized `InstructionRefs` bytes for a single Marginfi withdraw CPI.
+///
+/// This is passed as part of the `execute_withdraw` instruction data alongside
+/// `external_liquidity_source` (the slot index). The vault program then uses it
+/// to invoke the Marginfi `lending_account_withdraw` CPI via `CpiDispatcher`.
+///
+/// Wire format (`InstructionRefs` → `CpiRefs` → `CpiMapping`, all borsh):
+///   CpiMapping.indices  : [0,1,2,3,4,5,6,7,8]  — 9 remaining_accounts in order
+///   CpiMapping.lengths  : [9]                   — one CPI, 9 accounts
+///   CpiRefs.types       : [3]                   — CpiType::MARGINFI_WITHDRAW
+///   CpiRefs.args        : [0xFF, 0xFF]           — Skip sentinel; amount computed on-chain
+///   InstructionRefs.tracked: []
+///
+/// References:
+///   bankineco/rust/crates/common/src/accounts/refs.rs        (InstructionRefs)
+///   bankineco/rust/crates/common/src/cpi/refs.rs             (CpiRefs)
+///   bankineco/rust/crates/common/src/accounts/cpi.rs         (CpiMapping)
+///   bankineco/rust/crates/common/src/cpi/registry.rs         (CpiType::MARGINFI_WITHDRAW = 3)
+pub fn build_marginfi_withdraw_instruction_refs() -> Vec<u8> {
+    let mut out = Vec::with_capacity(33);
+    borsh_vec(&[0, 1, 2, 3, 4, 5, 6, 7, 8], &mut out); // CpiMapping.indices
+    borsh_vec(&[9], &mut out);                           // CpiMapping.lengths
+    borsh_vec(&[3], &mut out);                           // CpiRefs.types (MARGINFI_WITHDRAW)
+    borsh_vec(&[0xFF, 0xFF], &mut out);                  // CpiRefs.args  (Skip sentinel)
+    borsh_vec(&[], &mut out);                            // InstructionRefs.tracked
+    out
+}
+
+/// Build the remaining `AccountMeta`s that the vault program passes through to
+/// the Marginfi CPI inside `execute_withdraw`.
+///
+/// These are appended after the fixed `execute_withdraw` accounts.
+/// The account order matches the `CpiMapping.indices` built by
+/// [`build_marginfi_withdraw_instruction_refs`]:
+///
+///   [0] Marginfi program              (readonly)
+///   [1] marginfi_group                (writable)
+///   [2] marginfi_account              (writable)  ← vault's Marginfi user account
+///   [3] vault PDA                     (readonly)  ← signing authority (PDA-signs internally)
+///   [4] bank                          (writable)
+///   [5] vault_asset_ata               (writable)  ← withdrawal destination
+///   [6] bank_liquidity_vault_auth     (readonly)
+///   [7] bank_liquidity_vault          (writable)
+///   [8] token_program                 (readonly)
+///
+/// Validation by `validate_external_withdraw_refs` in execute_withdraw.rs:
+///   accounts[3].key == vault_key          (signer authority)
+///   accounts[5].key == vault_asset_ata    (destination)
+pub fn marginfi_withdraw_remaining_accounts(
+    marginfi_account: Pubkey,
+    vault: Pubkey,
+    vault_asset_ata: Pubkey,
+) -> Vec<AccountMeta> {
+    vec![
+        AccountMeta::new_readonly(MARGINFI_PROGRAM_ID, false),
+        AccountMeta::new(MAIN_MARGINFI_GROUP, false),
+        AccountMeta::new(marginfi_account, false),
+        AccountMeta::new_readonly(vault, false),
+        AccountMeta::new(MAIN_MARGINFI_BANK, false),
+        AccountMeta::new(vault_asset_ata, false),
+        AccountMeta::new_readonly(MAIN_MARGINFI_LIQUIDITY_VAULT_AUTH, false),
+        AccountMeta::new(MAIN_MARGINFI_LIQUIDITY_VAULT, false),
+        AccountMeta::new_readonly(anchor_spl::token::ID, false),
+    ]
 }
 
 /// Calculate the output amount and fee for a swap.
@@ -182,6 +283,7 @@ impl Amm for BankinecoAmm {
             self.base_asset_mint = mint;
             self.base_asset_decimals = decimals;
         }
+        self.marginfi_position = marginfi_position_from_vault(&self.vault_state);
 
         Ok(())
     }
@@ -300,13 +402,24 @@ impl Amm for BankinecoAmm {
             AccountMeta::new_readonly(SystemProgramId, false),
         ]);
 
-        // TODO: for execute_withdraw, the instruction data must include
-        //   `external_withdraw_ix_refs: Option<InstructionRefs>` and
-        //   `external_liquidity_source: Option<u8>` when the vault has external
-        //   liquidity (e.g. Marginfi). See:
-        //   bankineco/rust/programs/vault/src/instructions/vault/permissionless/execute_withdraw.rs
-        //   bankineco/rust/crates/common/src/accounts/refs.rs  (InstructionRefs layout)
-        //   Pass `(None, None)` for vaults with no external liquidity deployed.
+        // For withdrawals, append Marginfi remaining_accounts when the vault has
+        // external liquidity deployed. The vault program reads these via
+        // `ctx.remaining_accounts` and passes them to the CpiDispatcher.
+        //
+        // The instruction data for execute_withdraw must also include:
+        //   external_withdraw_ix_refs : Some(InstructionRefs)  ← build_marginfi_withdraw_instruction_refs()
+        //   external_liquidity_source : Some(slot_index)       ← marginfi_position.1
+        // Jupiter is responsible for encoding these into the instruction data alongside
+        // the share_amount argument (see execute_withdraw.rs for the full signature).
+        if !is_deposit {
+            if let Some((marginfi_account, _slot_index)) = self.marginfi_position {
+                account_metas.extend(marginfi_withdraw_remaining_accounts(
+                    marginfi_account,
+                    self.vault,
+                    vault_asset_ata,
+                ));
+            }
+        }
 
         Ok(SwapAndAccountMetas {
             swap: Swap::TokenSwap,
