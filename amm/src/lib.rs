@@ -20,6 +20,7 @@ use solana_pubkey::Pubkey;
 
 pub mod constants;
 pub mod holdings;
+pub mod liquidity;
 pub mod marginfi;
 pub mod math;
 

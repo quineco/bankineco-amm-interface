@@ -1,6 +1,11 @@
 use solana_pubkey::{ pubkey, Pubkey };
 
-pub const PROGRAM_ID: Pubkey = pubkey!("save8RQVPMWNTzU18t3GBvBkN9hT7jsGjiCQ28FpD9H");
+// pub const PROD_PROGRAM_ID: Pubkey = pubkey!("save8RQVPMWNTzU18t3GBvBkN9hT7jsGjiCQ28FpD9H");
+pub const PROGRAM_ID: Pubkey = pubkey!("6HyT8NQDpXY5wGkvX7haQVJ5nGUBVXQSkaT6Nf7fbsuJ");
+
+// pub const PROD_VAULT: Pubkey = pubkey!("ECJGrTZ6QYMEwiEAnL4oReWF126uc22e9Lojy9qyCjHT"); // vault_id = 0
+pub const TEST_VAULT: Pubkey = pubkey!("Bzj2KQqSaUB9QAWmdz1r4HttLjtGi5UQFTJrLx1B5hYK");
+
 pub const USD_STAR_MINT: Pubkey = pubkey!("star9agSpjiFe3M49B3RniVU4CMBBEK3Qnaqn3RGiFM");
 
 // Supported deposit/withdraw asset mints.
@@ -42,14 +47,14 @@ pub const MARGINFI_USDT: MarginfiMintConfig = MarginfiMintConfig {
     liquidity_vault_auth: pubkey!("7sXoVHHR7SLRB9Cz3EHjSM3M1JBoqB6fVLSmjVYTATxB"),
 };
 
-// TODO: fill in real Marginfi bank/vault addresses for PYUSD, USDG, USDS, CASH.
-// Using the system program pubkey (all-ones) as an obvious unset sentinel.
+// USDG and CASH have no Marginfi bank on mainnet (not listed in Marginfi's
+// bank registry). Using the system program pubkey as an obvious unset sentinel.
 const _UNSET: Pubkey = pubkey!("11111111111111111111111111111111");
 
 pub const MARGINFI_PYUSD: MarginfiMintConfig = MarginfiMintConfig {
-    bank: _UNSET,
-    liquidity_vault: _UNSET,
-    liquidity_vault_auth: _UNSET,
+    bank: pubkey!("8UEiPmgZHXXEDrqLS3oiTxQxTbeYTtPbeMBxAd2XGbpu"),
+    liquidity_vault: pubkey!("ENnfVnYcbKZN57mUYCvsMiNUXZ8m2Dc1HETyfNDD66A8"),
+    liquidity_vault_auth: pubkey!("582VxpQGLfUJRsdPYU2Q8dVLn1uxx9BuPMvtgwseB662"),
 };
 
 pub const MARGINFI_USDG: MarginfiMintConfig = MarginfiMintConfig {
@@ -59,9 +64,9 @@ pub const MARGINFI_USDG: MarginfiMintConfig = MarginfiMintConfig {
 };
 
 pub const MARGINFI_USDS: MarginfiMintConfig = MarginfiMintConfig {
-    bank: _UNSET,
-    liquidity_vault: _UNSET,
-    liquidity_vault_auth: _UNSET,
+    bank: pubkey!("FDsf8sj6SoV313qrA91yms3u5b3P4hBxEPvanVs8LtJV"),
+    liquidity_vault: pubkey!("26uoGkHSxBSL2oMcpdMZT7pss6wsiVCgFw6US58YZggd"),
+    liquidity_vault_auth: pubkey!("2bqe5Zdkw7zsyWZ2prmWgPbr3LfMCYEDNSqizTw2BqKL"),
 };
 
 pub const MARGINFI_CASH: MarginfiMintConfig = MarginfiMintConfig {
