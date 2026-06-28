@@ -47,10 +47,6 @@ pub const MARGINFI_USDT: MarginfiMintConfig = MarginfiMintConfig {
     liquidity_vault_auth: pubkey!("7sXoVHHR7SLRB9Cz3EHjSM3M1JBoqB6fVLSmjVYTATxB"),
 };
 
-// USDG and CASH have no Marginfi bank on mainnet (not listed in Marginfi's
-// bank registry). Using the system program pubkey as an obvious unset sentinel.
-const _UNSET: Pubkey = pubkey!("11111111111111111111111111111111");
-
 pub const MARGINFI_PYUSD: MarginfiMintConfig = MarginfiMintConfig {
     bank: pubkey!("8UEiPmgZHXXEDrqLS3oiTxQxTbeYTtPbeMBxAd2XGbpu"),
     liquidity_vault: pubkey!("ENnfVnYcbKZN57mUYCvsMiNUXZ8m2Dc1HETyfNDD66A8"),
@@ -58,9 +54,9 @@ pub const MARGINFI_PYUSD: MarginfiMintConfig = MarginfiMintConfig {
 };
 
 pub const MARGINFI_USDG: MarginfiMintConfig = MarginfiMintConfig {
-    bank: _UNSET,
-    liquidity_vault: _UNSET,
-    liquidity_vault_auth: _UNSET,
+    bank: pubkey!("Dj2CwMF3GM7mMT5hcyGXKuYSQ2kQ5zaVCkA1zX1qaTva"),
+    liquidity_vault: pubkey!("5Euy1GJaWcF8BcZa2wbvKZq9ZU95anedL9TW416ZJNpK"),
+    liquidity_vault_auth: pubkey!("J2RutaNtmw5Ri32iiZTexxNYHyDqJKbt6gVWCmv6hmnx"),
 };
 
 pub const MARGINFI_USDS: MarginfiMintConfig = MarginfiMintConfig {
@@ -70,9 +66,9 @@ pub const MARGINFI_USDS: MarginfiMintConfig = MarginfiMintConfig {
 };
 
 pub const MARGINFI_CASH: MarginfiMintConfig = MarginfiMintConfig {
-    bank: _UNSET,
-    liquidity_vault: _UNSET,
-    liquidity_vault_auth: _UNSET,
+    bank: pubkey!("F4brCRJHx8epWah7p8Ace4ehutphxYZ1ctRq2LS3iiBh"),
+    liquidity_vault: pubkey!("BogSuoRVycg5VSKSXi9YGjajhZ5uwCDA4HVPATEQXYVq"),
+    liquidity_vault_auth: pubkey!("2nbp41Q7xN9wtomgoP3APtanSvqTg5PfYyNafPyABBp6"),
 };
 
 /// Look up the Marginfi bank config for a given asset mint.
