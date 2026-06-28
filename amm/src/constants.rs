@@ -85,3 +85,16 @@ pub fn marginfi_config_for_mint(mint: &Pubkey) -> Option<&'static MarginfiMintCo
         _          => None,
     }
 }
+
+pub const TOKEN_2022_PROGRAM_ID: Pubkey = pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+
+/// Returns the correct SPL token program ID for a given mint.
+///
+/// PYUSD is a Token-2022 mint; all other supported assets use the legacy SPL token program.
+pub fn token_program_for_mint(mint: &Pubkey) -> Pubkey {
+    if *mint == PYUSD_MINT {
+        TOKEN_2022_PROGRAM_ID
+    } else {
+        anchor_spl::token::ID
+    }
+}

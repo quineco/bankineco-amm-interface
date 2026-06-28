@@ -211,8 +211,8 @@ impl Amm for BankinecoAmm {
             AccountMeta::new(fee_vault, false),
             AccountMeta::new(fee_vault_ata, false),
             AccountMeta::new(user_share_ata, false),
-            AccountMeta::new_readonly(anchor_spl::token::ID, false),       // asset_token_program
-            AccountMeta::new_readonly(anchor_spl::token::ID, false),       // share_token_program
+            AccountMeta::new_readonly(token_program_for_mint(asset_mint), false), // asset_token_program
+            AccountMeta::new_readonly(anchor_spl::token::ID, false),              // share_token_program
             AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
             AccountMeta::new_readonly(SystemProgramId, false),
         ]);
@@ -258,7 +258,9 @@ impl Amm for BankinecoAmm {
     }
 
     fn has_dynamic_accounts(&self) -> bool {
-        false
+        // Accounts vary with vault state: marginfi position adds 9 remaining accounts,
+        // tranching adds the tranche_state account.
+        true
     }
 
     fn requires_update_for_reserve_mints(&self) -> bool {
@@ -278,11 +280,23 @@ impl Amm for BankinecoAmm {
     }
 
     fn program_dependencies(&self) -> Vec<(Pubkey, String)> {
-        vec![]
+        if self.marginfi_position.is_some() {
+            vec![(MARGINFI_PROGRAM_ID, "marginfi".to_string())]
+        } else {
+            vec![]
+        }
     }
 
     fn get_accounts_len(&self) -> usize {
-        32
+        // Fixed accounts: user, vault, vault_oracle, asset_mint, share_mint,
+        // user_asset_ata, vault_asset_ata, fee_vault, fee_vault_ata,
+        // user_share_ata, asset_token_program, share_token_program,
+        // ata_program, system_program = 14
+        let tranche = if self.vault_state.tranching_enabled == 1 { 1 } else { 0 };
+        // Marginfi remaining accounts (9) are only appended on withdrawals, but
+        // we report the max so Jupiter can allocate the worst-case account list.
+        let marginfi = if self.marginfi_position.is_some() { 9 } else { 0 };
+        14 + tranche + marginfi
     }
 
     fn is_active(&self) -> bool {
