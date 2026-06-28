@@ -232,6 +232,7 @@ impl Amm for BankinecoAmm {
                         self.vault,
                         vault_asset_ata,
                         mint_config,
+                        constants::token_program_for_mint(asset_mint),
                     ));
                 }
                 slot_index

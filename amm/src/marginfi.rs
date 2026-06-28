@@ -75,6 +75,7 @@ pub fn marginfi_withdraw_remaining_accounts(
     vault: Pubkey,
     vault_asset_ata: Pubkey,
     mint_config: &MarginfiMintConfig,
+    token_program: Pubkey,
 ) -> Vec<AccountMeta> {
     vec![
         AccountMeta::new_readonly(MARGINFI_PROGRAM_ID, false),
@@ -85,6 +86,6 @@ pub fn marginfi_withdraw_remaining_accounts(
         AccountMeta::new(vault_asset_ata, false),
         AccountMeta::new_readonly(mint_config.liquidity_vault_auth, false),
         AccountMeta::new(mint_config.liquidity_vault, false),
-        AccountMeta::new_readonly(anchor_spl::token::ID, false),
+        AccountMeta::new_readonly(token_program, false),
     ]
 }
