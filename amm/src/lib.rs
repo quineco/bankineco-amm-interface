@@ -12,7 +12,7 @@ use jupiter_amm_interface::{
     SwapParams,
     try_get_account_data,
 };
-use anchor_spl::associated_token::get_associated_token_address;
+use anchor_spl::associated_token::get_associated_token_address_with_program_id;
 use anyhow::Result;
 use solana_sdk::instruction::AccountMeta;
 use solana_sdk::system_program::ID as SystemProgramId;
@@ -176,10 +176,12 @@ impl Amm for BankinecoAmm {
         ).0;
 
         // ATAs
-        let user_asset_ata = get_associated_token_address(user, asset_mint);
-        let vault_asset_ata = get_associated_token_address(&self.vault, asset_mint);
-        let fee_vault_ata = get_associated_token_address(&fee_vault, asset_mint);
-        let user_share_ata = get_associated_token_address(user, &self.share_mint);
+        let asset_token_program = constants::token_program_for_mint(asset_mint);
+        let share_token_program = anchor_spl::token::ID; // USD* is standard SPL Token
+        let user_asset_ata = get_associated_token_address_with_program_id(user, asset_mint, &asset_token_program);
+        let vault_asset_ata = get_associated_token_address_with_program_id(&self.vault, asset_mint, &asset_token_program);
+        let fee_vault_ata = get_associated_token_address_with_program_id(&fee_vault, asset_mint, &asset_token_program);
+        let user_share_ata = get_associated_token_address_with_program_id(user, &self.share_mint, &share_token_program);
 
         // Account order mirrors ExecuteDeposit / ExecuteWithdraw in the vault program:
         //   rust/programs/vault/src/instructions/vault/permissionless/execute_deposit.rs
@@ -211,8 +213,8 @@ impl Amm for BankinecoAmm {
             AccountMeta::new(fee_vault, false),
             AccountMeta::new(fee_vault_ata, false),
             AccountMeta::new(user_share_ata, false),
-            AccountMeta::new_readonly(token_program_for_mint(asset_mint), false), // asset_token_program
-            AccountMeta::new_readonly(anchor_spl::token::ID, false),              // share_token_program
+            AccountMeta::new_readonly(asset_token_program, false),
+            AccountMeta::new_readonly(share_token_program, false),
             AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
             AccountMeta::new_readonly(SystemProgramId, false),
         ]);
