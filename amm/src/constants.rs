@@ -28,6 +28,8 @@ pub struct MarginfiMintConfig {
     pub bank: Pubkey,
     pub liquidity_vault: Pubkey,
     pub liquidity_vault_auth: Pubkey,
+    /// Pyth price oracle account required by marginfi for the post-withdrawal health check.
+    pub oracle: Pubkey,
 }
 
 // ---------------------------------------------------------------------------
@@ -39,36 +41,42 @@ pub const MARGINFI_USDC: MarginfiMintConfig = MarginfiMintConfig {
     bank: pubkey!("2s37akK2eyBbp8DZgCm7RtsaEz8eJP3Nxd4urLHQv7yB"),
     liquidity_vault: pubkey!("7jaiZR5Sk8hdYN9MxTpczTcwbWpb5WEoxSANuUwveuat"),
     liquidity_vault_auth: pubkey!("3uxNepDbmkDNq6JhRja5Z8QwbTrfmkKP8AKZV5chYDGG"),
+    oracle: pubkey!("Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX"),
 };
 
 pub const MARGINFI_USDT: MarginfiMintConfig = MarginfiMintConfig {
     bank: pubkey!("HmpMfL8942u22htC4EMiandCNCtkoFtyytu6aTFZMoiD"),
     liquidity_vault: pubkey!("4tFJXnPFMWnqFBYBhd3FnBMWMM4PJJmqcCH4ZYrCFvNe"),
     liquidity_vault_auth: pubkey!("7sXoVHHR7SLRB9Cz3EHjSM3M1JBoqB6fVLSmjVYTATxB"),
+    oracle: pubkey!("HT2PLQBcG5W5UrEKtNkLwNhXHMdWJv7WKQUQYmFtB9KL"),
 };
 
 pub const MARGINFI_PYUSD: MarginfiMintConfig = MarginfiMintConfig {
     bank: pubkey!("8UEiPmgZHXXEDrqLS3oiTxQxTbeYTtPbeMBxAd2XGbpu"),
     liquidity_vault: pubkey!("ENnfVnYcbKZN57mUYCvsMiNUXZ8m2Dc1HETyfNDD66A8"),
     liquidity_vault_auth: pubkey!("582VxpQGLfUJRsdPYU2Q8dVLn1uxx9BuPMvtgwseB662"),
+    oracle: pubkey!("9zXQxpYH3kYhtoybmZfUNNCRVuud7fY9jswTg1hLyT8k"),
 };
 
 pub const MARGINFI_USDG: MarginfiMintConfig = MarginfiMintConfig {
     bank: pubkey!("Dj2CwMF3GM7mMT5hcyGXKuYSQ2kQ5zaVCkA1zX1qaTva"),
     liquidity_vault: pubkey!("5Euy1GJaWcF8BcZa2wbvKZq9ZU95anedL9TW416ZJNpK"),
     liquidity_vault_auth: pubkey!("J2RutaNtmw5Ri32iiZTexxNYHyDqJKbt6gVWCmv6hmnx"),
+    oracle: pubkey!("5jaKPgAzTZZKfDPSfBtCgETFBXSQkgBDovdFoHAK6m3C"),
 };
 
 pub const MARGINFI_USDS: MarginfiMintConfig = MarginfiMintConfig {
     bank: pubkey!("FDsf8sj6SoV313qrA91yms3u5b3P4hBxEPvanVs8LtJV"),
     liquidity_vault: pubkey!("26uoGkHSxBSL2oMcpdMZT7pss6wsiVCgFw6US58YZggd"),
     liquidity_vault_auth: pubkey!("2bqe5Zdkw7zsyWZ2prmWgPbr3LfMCYEDNSqizTw2BqKL"),
+    oracle: pubkey!("DyYBBWEi9xZvgNAeMDCiFnmC1U9gqgVsJDXkL5WETpoX"),
 };
 
 pub const MARGINFI_CASH: MarginfiMintConfig = MarginfiMintConfig {
     bank: pubkey!("F4brCRJHx8epWah7p8Ace4ehutphxYZ1ctRq2LS3iiBh"),
     liquidity_vault: pubkey!("BogSuoRVycg5VSKSXi9YGjajhZ5uwCDA4HVPATEQXYVq"),
     liquidity_vault_auth: pubkey!("2nbp41Q7xN9wtomgoP3APtanSvqTg5PfYyNafPyABBp6"),
+    oracle: pubkey!("6BfFmUuNJgQ5GCNj3V8YmgSLskFrQMWXa2N8i6ACsW5q"),
 };
 
 /// Look up the Marginfi bank config for a given asset mint.

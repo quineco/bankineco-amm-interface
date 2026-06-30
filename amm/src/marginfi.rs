@@ -34,10 +34,10 @@ fn borsh_vec(v: &[u8], out: &mut Vec<u8>) {
 /// Build the serialized `InstructionRefs` bytes for a single Marginfi withdraw CPI.
 ///
 /// Wire format (`InstructionRefs` → `CpiRefs` → `CpiMapping`, all borsh):
-///   CpiMapping.indices  : [0,1,2,3,4,5,6,7,8]  — 9 remaining_accounts in order
-///   CpiMapping.lengths  : [9]                   — one CPI, 9 accounts
-///   CpiRefs.types       : [3]                   — CpiType::MARGINFI_WITHDRAW
-///   CpiRefs.args        : [0xFF, 0xFF]           — Skip sentinel; amount computed on-chain
+///   CpiMapping.indices  : [0,1,2,3,4,5,6,7,8,9]  — 10 remaining_accounts in order
+///   CpiMapping.lengths  : [10]                    — one CPI, 10 accounts
+///   CpiRefs.types       : [3]                     — CpiType::MARGINFI_WITHDRAW
+///   CpiRefs.args        : [0xFF, 0xFF]             — Skip sentinel; amount computed on-chain
 ///   InstructionRefs.tracked: []
 ///
 /// References:
@@ -46,12 +46,12 @@ fn borsh_vec(v: &[u8], out: &mut Vec<u8>) {
 ///   bankineco/rust/crates/common/src/accounts/cpi.rs         (CpiMapping)
 ///   bankineco/rust/crates/common/src/cpi/registry.rs         (CpiType::MARGINFI_WITHDRAW = 3)
 pub fn build_marginfi_withdraw_instruction_refs() -> Vec<u8> {
-    let mut out = Vec::with_capacity(33);
-    borsh_vec(&[0, 1, 2, 3, 4, 5, 6, 7, 8], &mut out); // CpiMapping.indices
-    borsh_vec(&[9], &mut out);                           // CpiMapping.lengths
-    borsh_vec(&[3], &mut out);                           // CpiRefs.types (MARGINFI_WITHDRAW)
-    borsh_vec(&[0xFF, 0xFF], &mut out);                  // CpiRefs.args  (Skip sentinel)
-    borsh_vec(&[], &mut out);                            // InstructionRefs.tracked
+    let mut out = Vec::with_capacity(36);
+    borsh_vec(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], &mut out); // CpiMapping.indices
+    borsh_vec(&[10], &mut out);                             // CpiMapping.lengths
+    borsh_vec(&[3], &mut out);                              // CpiRefs.types (MARGINFI_WITHDRAW)
+    borsh_vec(&[0xFF, 0xFF], &mut out);                     // CpiRefs.args  (Skip sentinel)
+    borsh_vec(&[], &mut out);                               // InstructionRefs.tracked
     out
 }
 
@@ -70,6 +70,7 @@ pub fn build_marginfi_withdraw_instruction_refs() -> Vec<u8> {
 ///   [6] bank_liquidity_vault_auth     (readonly)  ← mint-specific
 ///   [7] bank_liquidity_vault          (writable)  ← mint-specific
 ///   [8] token_program                 (readonly)
+///   [9] oracle                        (readonly)  ← required for post-withdrawal health check
 pub fn marginfi_withdraw_remaining_accounts(
     marginfi_account: Pubkey,
     vault: Pubkey,
@@ -87,5 +88,6 @@ pub fn marginfi_withdraw_remaining_accounts(
         AccountMeta::new_readonly(mint_config.liquidity_vault_auth, false),
         AccountMeta::new(mint_config.liquidity_vault, false),
         AccountMeta::new_readonly(token_program, false),
+        AccountMeta::new_readonly(mint_config.oracle, false),
     ]
 }
