@@ -15,7 +15,6 @@ use jupiter_amm_interface::{
 use anchor_spl::associated_token::get_associated_token_address_with_program_id;
 use anyhow::Result;
 use solana_sdk::instruction::AccountMeta;
-use solana_sdk::system_program::ID as SystemProgramId;
 use solana_pubkey::Pubkey;
 
 pub mod constants;
@@ -198,7 +197,7 @@ impl Amm for BankinecoAmm {
         };
 
         let mut account_metas = vec![
-            AccountMeta::new(*user, true),
+            AccountMeta::new_readonly(*user, false),
             AccountMeta::new(self.vault, false),
             AccountMeta::new_readonly(vault_oracle, false),
         ];
@@ -215,8 +214,6 @@ impl Amm for BankinecoAmm {
             AccountMeta::new(user_share_ata, false),
             AccountMeta::new_readonly(asset_token_program, false),
             AccountMeta::new_readonly(share_token_program, false),
-            AccountMeta::new_readonly(anchor_spl::associated_token::ID, false),
-            AccountMeta::new_readonly(SystemProgramId, false),
         ]);
 
         // For withdrawals, always call execute_withdraw_from_external.
@@ -293,13 +290,12 @@ impl Amm for BankinecoAmm {
     fn get_accounts_len(&self) -> usize {
         // Fixed accounts: user, vault, vault_oracle, asset_mint, share_mint,
         // user_asset_ata, vault_asset_ata, fee_vault, fee_vault_ata,
-        // user_share_ata, asset_token_program, share_token_program,
-        // ata_program, system_program = 14
+        // user_share_ata, asset_token_program, share_token_program = 12
         let tranche = if self.vault_state.tranching_enabled == 1 { 1 } else { 0 };
         // Marginfi remaining accounts (9) are only appended on withdrawals, but
         // we report the max so Jupiter can allocate the worst-case account list.
         let marginfi = if self.marginfi_position.is_some() { 9 } else { 0 };
-        14 + tranche + marginfi
+        12 + tranche + marginfi
     }
 
     fn is_active(&self) -> bool {
