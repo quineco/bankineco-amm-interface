@@ -103,15 +103,17 @@ impl Amm for BankinecoAmm {
     }
 
     fn quote(&self, quote_params: &QuoteParams) -> Result<Quote> {
-        let share_price = self.vault_state.accounting.mint_share_price;
-        let share_decimals = self.vault_state.mint_decimals;
-
         let is_deposit = quote_params.input_mint != self.share_mint;
         let asset_mint = if is_deposit { quote_params.input_mint } else { quote_params.output_mint };
         let (asset_price, asset_decimals) =
             base_holding_for_mint(&self.vault_state, &asset_mint).ok_or_else(|| {
                 anyhow::anyhow!("Mint {} is not a whitelisted base asset", asset_mint)
             })?;
+
+        // Match onchain `shares_for_deposit_with_value` / withdraw planning:
+        // use TVL ÷ supply, not the floored `mint_share_price` inverse.
+        let total_mint_supply = self.vault_state.accounting.total_mint_supply;
+        let backing_value = self.vault_state.accounting.tvl;
 
         let fee_bps = if is_deposit {
             self.vault_state.config.fees.mint_fee_bps
@@ -125,25 +127,29 @@ impl Amm for BankinecoAmm {
             required_input_amount(
                 is_deposit,
                 quote_params.amount,
-                share_price,
-                share_decimals,
                 asset_price,
                 asset_decimals,
+                total_mint_supply,
+                backing_value,
                 fee_bps,
-            ).try_into()?
+            )
+            .ok_or_else(|| anyhow::anyhow!("Quote calculation overflow"))?
+            .try_into()?
         };
 
         let (out_amount, fee_amount) = calc_out_amount(
             is_deposit,
             in_amount,
-            share_price,
-            share_decimals,
             asset_price,
             asset_decimals,
+            total_mint_supply,
+            backing_value,
             fee_bps,
-        ).ok_or_else(|| anyhow::anyhow!("Quote calculation overflow"))?;
+        )
+        .ok_or_else(|| anyhow::anyhow!("Quote calculation overflow"))?;
 
-        let fee_mint = if is_deposit { self.share_mint } else { asset_mint };
+        // Onchain mint/burn fees are taken in the deposit/withdraw asset.
+        let fee_mint = asset_mint;
 
         Ok(Quote {
             in_amount,
@@ -331,12 +337,16 @@ mod tests {
         AmmContext { clock_ref: ClockRef::from(Clock::default()) }
     }
 
-    /// Build an AMM with a share price of 1.05, USDC as base, no fee by default.
+    /// Build an AMM with share NAV 1.05, USDC as base, no fee by default.
+    ///
+    /// `tvl / supply = 1.05` exactly so share price and the onchain ratio agree.
     fn make_amm() -> BankinecoAmm {
         let mut vault = make_vault();
         vault.mint_decimals = 6;
         vault.mint = USD_STAR_MINT.to_bytes();
-        vault.accounting.mint_share_price = 1_050_000; // 1.05 USD
+        vault.accounting.total_mint_supply = 1_000_000_000_000;
+        vault.accounting.tvl = 1_050_000_000_000; // 1.05 per share
+        vault.accounting.mint_share_price = 1_050_000;
         vault.config.fees.mint_fee_bps = 0;
         vault.config.fees.burn_fee_bps = 0;
         // Set a base holding (USDC, price = 1.00)
@@ -347,64 +357,115 @@ mod tests {
         BankinecoAmm::new(Pubkey::default(), vault)
     }
 
+    // supply/tvl fixture used by unit math tests (NAV = 1.05)
+    const TEST_SUPPLY: u64 = 1_000_000_000_000;
+    const TEST_TVL_PREMIUM: u64 = 1_050_000_000_000;
+    const TEST_TVL_PAR: u64 = 1_000_000_000_000;
+
     // -----------------------------------------------------------------------
     // calc_out_amount
     // -----------------------------------------------------------------------
 
     #[test]
     fn calc_out_deposit_at_par_no_fee() {
-        let (out, fee) = calc_out_amount(true, 1_000_000, 1_000_000, 6, 1_000_000, 6, 0).unwrap();
+        let (out, fee) =
+            calc_out_amount(true, 1_000_000, 1_000_000, 6, TEST_SUPPLY, TEST_TVL_PAR, 0).unwrap();
         assert_eq!(out, 1_000_000);
         assert_eq!(fee, 0);
     }
 
     #[test]
     fn calc_out_deposit_share_premium() {
-        // share_price = 1.05, asset_price = 1.00 → 1 USDC buys 1/1.05 shares
-        let (out, fee) =
-            calc_out_amount(true, 1_000_000, 1_050_000, 6, 1_000_000, 6, 0).unwrap();
-        assert_eq!(out, 952_380); // floor(1_000_000 * 1_000_000 / 1_050_000)
+        // tvl/supply = 1.05 → 1 USDC buys floor(1e6 * supply / tvl) shares
+        let (out, fee) = calc_out_amount(
+            true,
+            1_000_000,
+            1_000_000,
+            6,
+            TEST_SUPPLY,
+            TEST_TVL_PREMIUM,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, 952_380); // floor(1_000_000 * 1e12 / 1.05e12)
         assert_eq!(fee, 0);
     }
 
     #[test]
     fn calc_out_deposit_with_fee() {
-        // 10 bps on 1_000_000 gross → 1_000 fee, 999_000 net
+        // 10 bps on 1_000_000 accounting → 1_000 fee (asset), 999_000 shares
         let (out, fee) =
-            calc_out_amount(true, 1_000_000, 1_000_000, 6, 1_000_000, 6, 10).unwrap();
+            calc_out_amount(true, 1_000_000, 1_000_000, 6, TEST_SUPPLY, TEST_TVL_PAR, 10)
+                .unwrap();
         assert_eq!(out, 999_000);
         assert_eq!(fee, 1_000);
     }
 
     #[test]
+    fn calc_out_deposit_matches_onchain_not_share_price_inverse() {
+        // Floored mint_share_price would over-quote; supply/tvl must win.
+        // share_price = floor(tvl * 1e6 / supply) = 1_000_000, but tvl/supply > 1.
+        let supply = 1_000_000_000_000u64;
+        let tvl = 1_000_000_000_000u64 + 999_999;
+        let in_amount = 555_000_000u64;
+
+        let (out, _) =
+            calc_out_amount(true, in_amount, 1_000_000, 6, supply, tvl, 0).unwrap();
+        let onchain = (in_amount as u128 * supply as u128 / tvl as u128) as u64;
+        let share_price_inverse = in_amount; // floor(in * 1e6 / 1_000_000)
+
+        assert_eq!(out, onchain);
+        assert!(share_price_inverse - out >= 400);
+    }
+
+    #[test]
     fn calc_out_withdraw_at_par_no_fee() {
         let (out, fee) =
-            calc_out_amount(false, 1_000_000, 1_000_000, 6, 1_000_000, 6, 0).unwrap();
+            calc_out_amount(false, 1_000_000, 1_000_000, 6, TEST_SUPPLY, TEST_TVL_PAR, 0)
+                .unwrap();
         assert_eq!(out, 1_000_000);
         assert_eq!(fee, 0);
     }
 
     #[test]
     fn calc_out_withdraw_share_premium() {
-        // share_price = 1.05 → 1 share redeems 1.05 USDC
-        let (out, fee) =
-            calc_out_amount(false, 1_000_000, 1_050_000, 6, 1_000_000, 6, 0).unwrap();
+        // 1 share redeems floor(1e6 * tvl / supply) = 1.05 USDC
+        let (out, fee) = calc_out_amount(
+            false,
+            1_000_000,
+            1_000_000,
+            6,
+            TEST_SUPPLY,
+            TEST_TVL_PREMIUM,
+            0,
+        )
+        .unwrap();
         assert_eq!(out, 1_050_000);
         assert_eq!(fee, 0);
     }
 
     #[test]
     fn calc_out_withdraw_with_fee() {
-        // burn 30 bps on 1_050_000 gross → 3150 fee, 1_046_850 net
-        let (out, fee) =
-            calc_out_amount(false, 1_000_000, 1_050_000, 6, 1_000_000, 6, 30).unwrap();
+        // burn 30 bps on 1_050_000 accounting → 3150 fee, 1_046_850 net tokens
+        let (out, fee) = calc_out_amount(
+            false,
+            1_000_000,
+            1_000_000,
+            6,
+            TEST_SUPPLY,
+            TEST_TVL_PREMIUM,
+            30,
+        )
+        .unwrap();
         assert_eq!(out, 1_046_850);
         assert_eq!(fee, 3_150);
     }
 
     #[test]
-    fn calc_out_returns_none_on_zero_share_price() {
-        assert!(calc_out_amount(true, 1_000_000, 0, 6, 1_000_000, 6, 0).is_none());
+    fn calc_out_returns_none_on_zero_asset_price() {
+        assert!(
+            calc_out_amount(true, 1_000_000, 0, 6, TEST_SUPPLY, TEST_TVL_PAR, 0).is_none()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -413,29 +474,42 @@ mod tests {
 
     #[test]
     fn required_input_deposit_at_par_no_fee() {
-        let req = required_input_amount(true, 1_000_000, 1_000_000, 6, 1_000_000, 6, 0);
+        let req =
+            required_input_amount(true, 1_000_000, 1_000_000, 6, TEST_SUPPLY, TEST_TVL_PAR, 0)
+                .unwrap();
         assert_eq!(req, 1_000_000);
     }
 
     #[test]
     fn required_input_deposit_share_premium() {
-        // want 952_380 shares out; at 1.05 share price that requires 952_380 * 1.05 ≈ 1_000_000 USDC
-        let req = required_input_amount(true, 952_380, 1_050_000, 6, 1_000_000, 6, 0);
-        // floor(952_380 * 1_050_000 / 1_000_000) = 999_999, so req is 1_000_000 with ceil
+        // want 952_380 shares; ceil(952_380 * tvl / supply) accounting at par asset
+        let req = required_input_amount(
+            true,
+            952_380,
+            1_000_000,
+            6,
+            TEST_SUPPLY,
+            TEST_TVL_PREMIUM,
+            0,
+        )
+        .unwrap();
         assert_eq!(req, 999_999);
     }
 
     #[test]
     fn required_input_deposit_with_fee() {
-        // want exactly 999_000 shares; fee 10 bps; share=asset=1.0
-        // gross needed = 999_000 * 10000 / 9990 = 1_000_000
-        let req = required_input_amount(true, 999_000, 1_000_000, 6, 1_000_000, 6, 10);
+        // want exactly 999_000 shares; fee 10 bps; at par
+        let req =
+            required_input_amount(true, 999_000, 1_000_000, 6, TEST_SUPPLY, TEST_TVL_PAR, 10)
+                .unwrap();
         assert_eq!(req, 1_000_000);
     }
 
     #[test]
     fn required_input_withdraw_at_par_no_fee() {
-        let req = required_input_amount(false, 1_000_000, 1_000_000, 6, 1_000_000, 6, 0);
+        let req =
+            required_input_amount(false, 1_000_000, 1_000_000, 6, TEST_SUPPLY, TEST_TVL_PAR, 0)
+                .unwrap();
         assert_eq!(req, 1_000_000);
     }
 
@@ -446,32 +520,64 @@ mod tests {
     #[test]
     fn roundtrip_deposit_exact_in_then_exact_out() {
         let in_amount: u64 = 1_234_567;
-        let share_price = 1_050_000u64;
         let asset_price = 1_000_000u64;
         let fee_bps = 30u16;
 
-        let (out, _) =
-            calc_out_amount(true, in_amount, share_price, 6, asset_price, 6, fee_bps).unwrap();
-        let req = required_input_amount(true, out, share_price, 6, asset_price, 6, fee_bps);
+        let (out, _) = calc_out_amount(
+            true,
+            in_amount,
+            asset_price,
+            6,
+            TEST_SUPPLY,
+            TEST_TVL_PREMIUM,
+            fee_bps,
+        )
+        .unwrap();
+        let req = required_input_amount(
+            true,
+            out,
+            asset_price,
+            6,
+            TEST_SUPPLY,
+            TEST_TVL_PREMIUM,
+            fee_bps,
+        )
+        .unwrap();
 
-        // Ceil rounding means required >= original, but only by at most 1
+        // Ceil rounding means required >= original, but only by a small amount
         assert!(req as u64 >= in_amount);
-        assert!(req as u64 <= in_amount + 1);
+        assert!(req as u64 <= in_amount + 2);
     }
 
     #[test]
     fn roundtrip_withdraw_exact_in_then_exact_out() {
         let in_shares: u64 = 987_654;
-        let share_price = 1_050_000u64;
         let asset_price = 1_000_000u64;
         let fee_bps = 20u16;
 
-        let (out, _) =
-            calc_out_amount(false, in_shares, share_price, 6, asset_price, 6, fee_bps).unwrap();
-        let req = required_input_amount(false, out, share_price, 6, asset_price, 6, fee_bps);
+        let (out, _) = calc_out_amount(
+            false,
+            in_shares,
+            asset_price,
+            6,
+            TEST_SUPPLY,
+            TEST_TVL_PREMIUM,
+            fee_bps,
+        )
+        .unwrap();
+        let req = required_input_amount(
+            false,
+            out,
+            asset_price,
+            6,
+            TEST_SUPPLY,
+            TEST_TVL_PREMIUM,
+            fee_bps,
+        )
+        .unwrap();
 
         assert!(req as u64 >= in_shares);
-        assert!(req as u64 <= in_shares + 1);
+        assert!(req as u64 <= in_shares + 2);
     }
 
     // -----------------------------------------------------------------------
@@ -675,6 +781,8 @@ mod tests {
         let mut vault = make_vault();
         vault.mint_decimals = 6;
         vault.mint = USD_STAR_MINT.to_bytes();
+        vault.accounting.total_mint_supply = TEST_SUPPLY;
+        vault.accounting.tvl = TEST_TVL_PAR;
         vault.accounting.mint_share_price = 1_000_000;
         vault.config.fees.mint_fee_bps = 10; // 0.1%
         vault.holdings[0].mint = USDC_MINT.to_bytes();
@@ -693,7 +801,7 @@ mod tests {
             .unwrap();
         assert_eq!(q.out_amount, 999_000);
         assert_eq!(q.fee_amount, 1_000);
-        assert_eq!(q.fee_mint, USD_STAR_MINT);
+        assert_eq!(q.fee_mint, USDC_MINT);
     }
 
     #[test]
@@ -701,6 +809,8 @@ mod tests {
         let mut vault = make_vault();
         vault.mint_decimals = 6;
         vault.mint = USD_STAR_MINT.to_bytes();
+        vault.accounting.total_mint_supply = TEST_SUPPLY;
+        vault.accounting.tvl = TEST_TVL_PAR;
         vault.accounting.mint_share_price = 1_000_000;
         vault.config.fees.burn_fee_bps = 20; // 0.2%
         vault.holdings[0].mint = USDC_MINT.to_bytes();
@@ -777,6 +887,8 @@ mod tests {
         let mut vault = make_vault();
         vault.mint_decimals = 6;
         vault.mint = USD_STAR_MINT.to_bytes();
+        vault.accounting.total_mint_supply = TEST_SUPPLY;
+        vault.accounting.tvl = TEST_TVL_PAR;
         vault.accounting.mint_share_price = 1_000_000;
         vault.holdings[0].mint = USDC_MINT.to_bytes();
         vault.holdings[0].is_base = 1;
@@ -788,7 +900,7 @@ mod tests {
         vault.holdings[1].price = 990_000; // 0.99 USD
         let amm = BankinecoAmm::new(Pubkey::default(), vault);
 
-        // deposit USDT: 1_000_000 USDT at 0.99 → 990_000 shares
+        // deposit USDT: 1_000_000 USDT at 0.99 → 990_000 accounting → 990_000 shares
         let q = amm.quote(&QuoteParams {
             amount: 1_000_000,
             input_mint: usdt_mint,
@@ -797,7 +909,7 @@ mod tests {
         }).unwrap();
         assert_eq!(q.in_amount, 1_000_000);
         assert_eq!(q.out_amount, 990_000);
-        assert_eq!(q.fee_mint, USD_STAR_MINT);
+        assert_eq!(q.fee_mint, usdt_mint);
     }
 
     #[test]
@@ -806,6 +918,8 @@ mod tests {
         let mut vault = make_vault();
         vault.mint_decimals = 6;
         vault.mint = USD_STAR_MINT.to_bytes();
+        vault.accounting.total_mint_supply = TEST_SUPPLY;
+        vault.accounting.tvl = TEST_TVL_PAR;
         vault.accounting.mint_share_price = 1_000_000;
         vault.holdings[0].mint = USDC_MINT.to_bytes();
         vault.holdings[0].is_base = 1;
