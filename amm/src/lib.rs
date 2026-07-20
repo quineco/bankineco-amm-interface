@@ -1,4 +1,4 @@
-use vault_sdk::Vault;
+use vault_sdk::{Vault, VaultTrancheState};
 use jupiter_amm_interface::{
     AccountMap,
     Amm,
@@ -13,7 +13,7 @@ use jupiter_amm_interface::{
     try_get_account_data,
 };
 use anchor_spl::associated_token::get_associated_token_address_with_program_id;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use solana_sdk::instruction::AccountMeta;
 use solana_pubkey::Pubkey;
 
@@ -28,6 +28,10 @@ use holdings::{find_base_holding, base_holding_for_mint, holding_mints};
 use marginfi::{marginfi_position_from_vault, marginfi_withdraw_remaining_accounts};
 use math::{calc_out_amount, required_input_amount};
 
+fn vault_tranche_pda(vault: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"vault_tranche", vault.as_ref()], &PROGRAM_ID).0
+}
+
 #[derive(Copy, Clone)]
 pub struct BankinecoAmm {
     vault: Pubkey,
@@ -35,6 +39,9 @@ pub struct BankinecoAmm {
     share_mint: Pubkey,
     base_asset_mint: Pubkey,
     base_asset_decimals: u8,
+    /// Junior + senior tranche claim on TVL (accounting units). Zero when
+    /// tranching is disabled. Regular share-class NAV is `tvl - tranche_value`.
+    tranche_value: u64,
     /// Vault's Marginfi user account and the external_liquidity slot index it
     /// occupies, if the vault has Marginfi external liquidity deployed.
     marginfi_position: Option<(Pubkey, u8)>,
@@ -42,11 +49,26 @@ pub struct BankinecoAmm {
 
 impl BankinecoAmm {
     pub fn new(vault: Pubkey, vault_state: Vault) -> Self {
-        let share_mint = Pubkey::from(vault_state.mint);
-        let (base_asset_mint, base_asset_decimals) =
-            find_base_holding(&vault_state).unwrap_or((USDC_MINT, 6));
-        let marginfi_position = marginfi_position_from_vault(&vault_state);
-        Self { vault, vault_state, share_mint, base_asset_mint, base_asset_decimals, marginfi_position }
+        let mut amm = Self {
+            vault,
+            vault_state,
+            share_mint: Pubkey::default(),
+            base_asset_mint: USDC_MINT,
+            base_asset_decimals: 6,
+            tranche_value: 0,
+            marginfi_position: None,
+        };
+        amm.refresh_from_state();
+        amm
+    }
+
+    fn refresh_from_state(&mut self) {
+        self.share_mint = Pubkey::from(self.vault_state.mint);
+        if let Some((mint, decimals)) = find_base_holding(&self.vault_state) {
+            self.base_asset_mint = mint;
+            self.base_asset_decimals = decimals;
+        }
+        self.marginfi_position = marginfi_position_from_vault(&self.vault_state);
     }
 }
 
@@ -84,21 +106,30 @@ impl Amm for BankinecoAmm {
     }
 
     fn get_accounts_to_update(&self) -> Vec<Pubkey> {
-        vec![self.vault]
+        let mut accounts = vec![self.vault];
+        if self.vault_state.tranching_enabled == 1 {
+            accounts.push(vault_tranche_pda(&self.vault));
+        }
+        accounts
     }
 
     fn update(&mut self, account_map: &AccountMap) -> Result<()> {
         let vault_data = try_get_account_data(account_map, &self.vault)?;
         self.vault_state = Vault::from_account_data(vault_data)
-            .map_err(|e| anyhow::anyhow!("Vault load error: {:?}", e))?;
+            .map_err(|e| anyhow!("Vault load error: {:?}", e))?;
+        self.refresh_from_state();
 
-        self.share_mint = Pubkey::from(self.vault_state.mint);
-        if let Some((mint, decimals)) = find_base_holding(&self.vault_state) {
-            self.base_asset_mint = mint;
-            self.base_asset_decimals = decimals;
-        }
-        self.marginfi_position = marginfi_position_from_vault(&self.vault_state);
-
+        // Tranche classes claim part of TVL; the regular share class is backed by
+        // tvl - tranche_value. Read the tranche state when tranching is enabled.
+        self.tranche_value = if self.vault_state.tranching_enabled == 1 {
+            let tranche_pda = vault_tranche_pda(&self.vault);
+            let tranche_data = try_get_account_data(account_map, &tranche_pda)?;
+            let tranche = VaultTrancheState::from_account_data(tranche_data)
+                .map_err(|e| anyhow!("Tranche load error: {:?}", e))?;
+            tranche.junior.value.saturating_add(tranche.senior.value)
+        } else {
+            0
+        };
         Ok(())
     }
 
@@ -107,13 +138,18 @@ impl Amm for BankinecoAmm {
         let asset_mint = if is_deposit { quote_params.input_mint } else { quote_params.output_mint };
         let (asset_price, asset_decimals) =
             base_holding_for_mint(&self.vault_state, &asset_mint).ok_or_else(|| {
-                anyhow::anyhow!("Mint {} is not a whitelisted base asset", asset_mint)
+                anyhow!("Mint {} is not a whitelisted base asset", asset_mint)
             })?;
 
-        // Match onchain `shares_for_deposit_with_value` / withdraw planning:
-        // use TVL ÷ supply, not the floored `mint_share_price` inverse.
+        // Match onchain deposit/withdraw planning: shares are minted/burned against
+        // the regular class NAV (TVL net of the tranche classes' claim) ÷ supply,
+        // not the floored mint_share_price inverse (which caused quote drift).
         let total_mint_supply = self.vault_state.accounting.total_mint_supply;
-        let backing_value = self.vault_state.accounting.tvl;
+        let backing_value = self
+            .vault_state
+            .accounting
+            .tvl
+            .saturating_sub(self.tranche_value);
 
         let fee_bps = if is_deposit {
             self.vault_state.config.fees.mint_fee_bps
@@ -133,7 +169,7 @@ impl Amm for BankinecoAmm {
                 backing_value,
                 fee_bps,
             )
-            .ok_or_else(|| anyhow::anyhow!("Quote calculation overflow"))?
+            .ok_or_else(|| anyhow!("Quote calculation overflow"))?
             .try_into()?
         };
 
@@ -146,7 +182,7 @@ impl Amm for BankinecoAmm {
             backing_value,
             fee_bps,
         )
-        .ok_or_else(|| anyhow::anyhow!("Quote calculation overflow"))?;
+        .ok_or_else(|| anyhow!("Quote calculation overflow"))?;
 
         // Onchain mint/burn fees are taken in the deposit/withdraw asset.
         let fee_mint = asset_mint;
@@ -192,12 +228,7 @@ impl Amm for BankinecoAmm {
         //   rust/programs/vault/src/instructions/vault/permissionless/execute_deposit.rs
         //   rust/programs/vault/src/instructions/vault/permissionless/execute_withdraw.rs
         let vault_tranche_state = if self.vault_state.tranching_enabled == 1 {
-            Some(
-                Pubkey::find_program_address(
-                    &[b"vault_tranche", self.vault.as_ref()],
-                    &PROGRAM_ID,
-                ).0,
-            )
+            Some(vault_tranche_pda(&self.vault))
         } else {
             None
         };
@@ -316,7 +347,7 @@ mod tests {
     use jupiter_amm_interface::{AmmContext, ClockRef, KeyedAccount, SwapMode};
     use solana_sdk::account::Account;
     use solana_sdk::clock::Clock;
-    use vault_sdk::{Vault, VAULT_DISCRIMINATOR};
+    use vault_sdk::{Vault, VaultTrancheState, VAULT_DISCRIMINATOR, VAULT_TRANCHE_STATE_DISCRIMINATOR};
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -330,6 +361,13 @@ mod tests {
         let mut data = Vec::with_capacity(8 + std::mem::size_of::<Vault>());
         data.extend_from_slice(&VAULT_DISCRIMINATOR);
         data.extend_from_slice(bytes_of(vault));
+        data
+    }
+
+    fn tranche_bytes(tranche: &VaultTrancheState) -> Vec<u8> {
+        let mut data = Vec::with_capacity(8 + std::mem::size_of::<VaultTrancheState>());
+        data.extend_from_slice(&VAULT_TRANCHE_STATE_DISCRIMINATOR);
+        data.extend_from_slice(bytes_of(tranche));
         data
     }
 
@@ -740,6 +778,18 @@ mod tests {
         assert_eq!(amm.get_accounts_to_update(), vec![vault_key]);
     }
 
+    #[test]
+    fn get_accounts_to_update_includes_tranche_when_enabled() {
+        let vault_key = Pubkey::new_unique();
+        let mut vault = make_vault();
+        vault.tranching_enabled = 1;
+        let amm = BankinecoAmm::new(vault_key, vault);
+        assert_eq!(
+            amm.get_accounts_to_update(),
+            vec![vault_key, vault_tranche_pda(&vault_key)]
+        );
+    }
+
     // -----------------------------------------------------------------------
     // quote – ExactIn
     // -----------------------------------------------------------------------
@@ -1004,5 +1054,55 @@ mod tests {
         assert_eq!(amm.vault_state.accounting.mint_share_price, 1_100_000);
         assert_eq!(amm.share_mint, USD_STAR_MINT);
         assert_eq!(amm.base_asset_mint, USDC_MINT);
+        assert_eq!(amm.tranche_value, 0);
+    }
+
+    #[test]
+    fn update_loads_tranche_value_when_tranching_enabled() {
+        let vault_key = Pubkey::new_unique();
+        let mut amm = BankinecoAmm::new(vault_key, make_vault());
+
+        let mut updated_vault = make_vault();
+        updated_vault.tranching_enabled = 1;
+        updated_vault.mint = USD_STAR_MINT.to_bytes();
+        updated_vault.accounting.tvl = 1_000_000_000_000;
+        updated_vault.holdings[0].mint = USDC_MINT.to_bytes();
+        updated_vault.holdings[0].is_base = 1;
+        updated_vault.holdings[0].decimals = 6;
+        updated_vault.holdings[0].price = 1_000_000;
+
+        let mut tranche = VaultTrancheState::zeroed();
+        tranche.junior.value = 100_000_000_000;
+        tranche.senior.value = 50_000_000_000;
+
+        let mut account_map = AccountMap::default();
+        account_map.insert(
+            vault_key,
+            Account { data: vault_bytes(&updated_vault), ..Account::default() },
+        );
+        account_map.insert(
+            vault_tranche_pda(&vault_key),
+            Account { data: tranche_bytes(&tranche), ..Account::default() },
+        );
+
+        amm.update(&account_map).unwrap();
+        assert_eq!(amm.tranche_value, 150_000_000_000);
+    }
+
+    #[test]
+    fn quote_deposit_uses_regular_class_nav_when_tranched() {
+        let mut amm = make_amm();
+        // tvl=1.05e12, tranche claim=0.05e12 → regular backing = 1.00e12 (= supply)
+        amm.tranche_value = 50_000_000_000;
+        let q = amm
+            .quote(&QuoteParams {
+                amount: 1_000_000,
+                input_mint: USDC_MINT,
+                output_mint: USD_STAR_MINT,
+                swap_mode: SwapMode::ExactIn,
+            })
+            .unwrap();
+        assert_eq!(q.out_amount, 1_000_000);
+        assert_eq!(q.fee_amount, 0);
     }
 }
