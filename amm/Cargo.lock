@@ -4189,9 +4189,9 @@ dependencies = [
 
 [[package]]
 name = "vault-sdk"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94fbcd256e4d0d0e136b3b671f7f9aa49853cb0a66a697c6c2a61db0c026eb1f"
+checksum = "abe48c2da7b80cc764348c6d862c2f21de710649ac527263c26532a3f007362a"
 dependencies = [
  "bytemuck",
  "bytemuck_derive",

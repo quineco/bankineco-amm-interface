@@ -1,4 +1,5 @@
-use solana_pubkey::{ pubkey, Pubkey };
+use solana_pubkey::{pubkey, Pubkey};
+use vault_sdk::{TokenProgram, Vault};
 
 // pub const PROD_PROGRAM_ID: Pubkey = pubkey!("save8RQVPMWNTzU18t3GBvBkN9hT7jsGjiCQ28FpD9H");
 pub const PROGRAM_ID: Pubkey = pubkey!("6HyT8NQDpXY5wGkvX7haQVJ5nGUBVXQSkaT6Nf7fbsuJ");
@@ -94,15 +95,29 @@ pub fn marginfi_config_for_mint(mint: &Pubkey) -> Option<&'static MarginfiMintCo
     }
 }
 
-pub const TOKEN_2022_PROGRAM_ID: Pubkey = pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+/// Maps a vault-sdk `TokenProgram` discriminant to its on-chain program id.
+pub fn pubkey_for_token_program(tp: TokenProgram) -> Pubkey {
+    Pubkey::from(tp.program_id())
+}
 
-/// Returns the correct SPL token program ID for a given mint.
+/// Share-mint token program from `vault.mint_token_program`.
 ///
-/// PYUSD is a Token-2022 mint; all other supported assets use the legacy SPL token program.
-pub fn token_program_for_mint(mint: &Pubkey) -> Pubkey {
-    if *mint == PYUSD_MINT {
-        TOKEN_2022_PROGRAM_ID
-    } else {
-        anchor_spl::token::ID
-    }
+/// Falls back to legacy SPL Token if the stored discriminant is unrecognized
+/// (e.g. pre-migration accounts that still have zeroed trailing padding).
+pub fn share_token_program(vault: &Vault) -> Pubkey {
+    vault
+        .share_mint_token_program()
+        .map(pubkey_for_token_program)
+        .unwrap_or(anchor_spl::token::ID)
+}
+
+/// Token program for a vault holding mint, read from the holding's cached
+/// `token_program` enum. Returns `None` if the mint is not a vault holding.
+pub fn token_program_for_vault_mint(vault: &Vault, mint: &Pubkey) -> Option<Pubkey> {
+    vault
+        .holdings
+        .iter()
+        .find(|h| h.mint != [0u8; 32] && &Pubkey::from(h.mint) == mint)
+        .and_then(|h| h.token_program_enum().ok())
+        .map(pubkey_for_token_program)
 }

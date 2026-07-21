@@ -216,9 +216,13 @@ impl Amm for BankinecoAmm {
             &PROGRAM_ID,
         ).0;
 
-        // ATAs
-        let asset_token_program = constants::token_program_for_mint(asset_mint);
-        let share_token_program = anchor_spl::token::ID; // USD* is standard SPL Token
+        // ATAs — token programs come from vault state (share mint enum + holding enum).
+        let asset_token_program = constants::token_program_for_vault_mint(
+            &self.vault_state,
+            asset_mint,
+        )
+        .ok_or_else(|| anyhow!("Asset mint is not a vault holding: {asset_mint}"))?;
+        let share_token_program = constants::share_token_program(&self.vault_state);
         let user_asset_ata = get_associated_token_address_with_program_id(user, asset_mint, &asset_token_program);
         let vault_asset_ata = get_associated_token_address_with_program_id(&self.vault, asset_mint, &asset_token_program);
         let fee_vault_ata = get_associated_token_address_with_program_id(&fee_vault, asset_mint, &asset_token_program);
@@ -268,7 +272,7 @@ impl Amm for BankinecoAmm {
                         self.vault,
                         vault_asset_ata,
                         mint_config,
-                        constants::token_program_for_mint(asset_mint),
+                        asset_token_program,
                     ));
                 }
                 slot_index

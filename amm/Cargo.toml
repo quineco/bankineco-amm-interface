@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anchor-spl = "0.32.1"
 anyhow = "1.0"
-vault-sdk = "0.1.0"
+vault-sdk = "0.1.1"
 jupiter-amm-interface = "0.6.0"
 rust_decimal = "1.39.0"
 solana-pubkey = "2.4.0"
