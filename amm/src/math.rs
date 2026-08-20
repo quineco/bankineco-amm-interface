@@ -265,3 +265,217 @@ pub fn required_input_amount(
         )
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tranche class math
+//
+// Tranche shares are priced against their own class accounting
+// (`VaultTrancheAccounting { value, total_supply }`), not the regular class
+// NAV. See `common::state::tranche::VaultTrancheAccounting::shares_for_deposit`
+// / `amount_for_shares` and `vault::mint_burn::plan_tranche_deposit` /
+// `plan_tranche_withdraw`.
+// ---------------------------------------------------------------------------
+
+/// `floor(amount × class_supply / class_value)`, or `amount` for an empty class.
+///
+/// Mirrors `VaultTrancheAccounting::shares_for_deposit`: an empty class mints
+/// 1:1, and a class with supply but no value is insolvent (`None`) rather than
+/// minting free shares.
+fn tranche_shares_for_deposit(amount: u64, class_supply: u64, class_value: u64) -> Option<u64> {
+    if class_supply == 0 {
+        return Some(amount);
+    }
+    if class_value == 0 {
+        return None;
+    }
+    mul_div(amount as u128, class_supply as u128, class_value as u128)?.try_into().ok()
+}
+
+/// Tranche deposit quote: base asset in → tranche receipt tokens out.
+///
+/// `fee_bps` is the vault's `mint_fee_bps`; the fee is taken in accounting units
+/// before shares are minted, exactly as in `plan_tranche_deposit`.
+///
+/// Returns `(tranche_shares_out, fee_in_asset_tokens)`.
+pub fn calc_tranche_deposit_out(
+    in_amount: u64,
+    asset_price: u64,
+    asset_decimals: u8,
+    class_supply: u64,
+    class_value: u64,
+    fee_bps: u16,
+) -> Option<(u64, u64)> {
+    let accounting = accounting_amount_for_asset(in_amount, asset_price, asset_decimals)?;
+    if accounting == 0 {
+        return None;
+    }
+    let fee_accounting = fee_for_bps(accounting, fee_bps)?;
+    let net_accounting = accounting.checked_sub(fee_accounting)?;
+    let shares = tranche_shares_for_deposit(net_accounting, class_supply, class_value)?;
+    if shares == 0 {
+        // `plan_tranche_deposit` rejects deposits that mint zero shares.
+        return None;
+    }
+    let fee_tokens = token_amount_for_accounting(fee_accounting, asset_price, asset_decimals)?;
+    Some((shares, fee_tokens))
+}
+
+/// Tranche withdraw quote: tranche receipt tokens in → base asset out.
+///
+/// `fee_bps` is the unstake fee for the class (junior: `early_unstake_fee_bps`
+/// on the instant-redemption path, `standard_unstake_fee_bps` on the request /
+/// fulfill path; senior: always 0).
+///
+/// Returns `(asset_tokens_out, fee_in_asset_tokens)`.
+pub fn calc_tranche_withdraw_out(
+    in_shares: u64,
+    asset_price: u64,
+    asset_decimals: u8,
+    class_supply: u64,
+    class_value: u64,
+    fee_bps: u16,
+) -> Option<(u64, u64)> {
+    if class_supply == 0 {
+        return None;
+    }
+    let gross = amount_for_withdraw_shares(in_shares, class_supply, class_value)?;
+    if gross == 0 {
+        // `VaultTrancheState::plan_withdraw` requires a non-zero gross amount.
+        return None;
+    }
+    let fee_accounting = fee_for_bps(gross, fee_bps)?;
+    let net_accounting = gross.checked_sub(fee_accounting)?;
+    let net_tokens = token_amount_for_accounting(net_accounting, asset_price, asset_decimals)?;
+    let fee_tokens = token_amount_for_accounting(fee_accounting, asset_price, asset_decimals)?;
+    Some((net_tokens, fee_tokens))
+}
+
+/// Output amount and fee for a tranche swap.
+///
+/// `is_deposit = true`  → base asset in, tranche receipt out (`execute_tranche_deposit`)
+/// `is_deposit = false` → tranche receipt in, base asset out (`execute_tranche_withdraw`)
+pub fn calc_tranche_out_amount(
+    is_deposit: bool,
+    in_amount: u64,
+    asset_price: u64,
+    asset_decimals: u8,
+    class_supply: u64,
+    class_value: u64,
+    fee_bps: u16,
+) -> Option<(u64, u64)> {
+    if is_deposit {
+        calc_tranche_deposit_out(
+            in_amount,
+            asset_price,
+            asset_decimals,
+            class_supply,
+            class_value,
+            fee_bps,
+        )
+    } else {
+        calc_tranche_withdraw_out(
+            in_amount,
+            asset_price,
+            asset_decimals,
+            class_supply,
+            class_value,
+            fee_bps,
+        )
+    }
+}
+
+/// Required asset input for an exact-output tranche deposit (ceiling division).
+pub fn required_tranche_deposit_input(
+    desired_shares: u64,
+    asset_price: u64,
+    asset_decimals: u8,
+    class_supply: u64,
+    class_value: u64,
+    fee_bps: u16,
+) -> Option<u128> {
+    if asset_price == 0 || fee_bps as u128 > BPS {
+        return None;
+    }
+
+    // Minimum net accounting such that tranche_shares_for_deposit(net) >= desired.
+    let net_min: u128 = if class_supply == 0 {
+        desired_shares as u128
+    } else if class_value == 0 {
+        return None;
+    } else {
+        ceil_div(
+            (desired_shares as u128).checked_mul(class_value as u128)?,
+            class_supply as u128,
+        )?
+    };
+
+    let effective_bps = BPS - fee_bps as u128;
+    let accounting_min = if fee_bps == 0 {
+        net_min
+    } else {
+        ceil_div(net_min.checked_mul(BPS)?, effective_bps)?
+    };
+
+    let scale = 10u128.pow(asset_decimals as u32);
+    ceil_div(accounting_min.checked_mul(scale)?, asset_price as u128)
+}
+
+/// Required tranche-share input for an exact-output tranche withdraw (ceiling division).
+pub fn required_tranche_withdraw_input(
+    desired_tokens: u64,
+    asset_price: u64,
+    asset_decimals: u8,
+    class_supply: u64,
+    class_value: u64,
+    fee_bps: u16,
+) -> Option<u128> {
+    if asset_price == 0 || class_supply == 0 || class_value == 0 || fee_bps as u128 > BPS {
+        return None;
+    }
+
+    let scale = 10u128.pow(asset_decimals as u32);
+    let net_acc_min = ceil_div((desired_tokens as u128).checked_mul(asset_price as u128)?, scale)?;
+    let effective_bps = BPS - fee_bps as u128;
+    let gross_min = if fee_bps == 0 {
+        net_acc_min
+    } else {
+        ceil_div(net_acc_min.checked_mul(BPS)?, effective_bps)?
+    };
+
+    // shares >= ceil(gross_min × class_supply / class_value)
+    ceil_div(
+        gross_min.checked_mul(class_supply as u128)?,
+        class_value as u128,
+    )
+}
+
+/// Required input for an exact-output tranche swap (ceiling division).
+pub fn required_tranche_input_amount(
+    is_deposit: bool,
+    desired_out: u64,
+    asset_price: u64,
+    asset_decimals: u8,
+    class_supply: u64,
+    class_value: u64,
+    fee_bps: u16,
+) -> Option<u128> {
+    if is_deposit {
+        required_tranche_deposit_input(
+            desired_out,
+            asset_price,
+            asset_decimals,
+            class_supply,
+            class_value,
+            fee_bps,
+        )
+    } else {
+        required_tranche_withdraw_input(
+            desired_out,
+            asset_price,
+            asset_decimals,
+            class_supply,
+            class_value,
+            fee_bps,
+        )
+    }
+}

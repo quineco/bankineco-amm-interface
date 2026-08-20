@@ -15,7 +15,7 @@ pub const USDT_MINT: Pubkey = pubkey!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8Benw
 pub const PYUSD_MINT: Pubkey = pubkey!("2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo");
 pub const USDG_MINT: Pubkey = pubkey!("GbMiMDYFX9sVMNQFmqmgKMhWfBvPNTJjxz4YubDKtDKE");
 pub const USDS_MINT: Pubkey = pubkey!("USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA");
-pub const CASH_MINT: Pubkey = pubkey!("CASHVDm2wsJXfhj6VWxb7GiMdoLc17Du7paH4bNr5woT");
+pub const CASH_MINT: Pubkey = pubkey!("CASHx9KJUStyftLFWGvEVf59SGeG9sh5FfcnZMVPCASH");
 
 pub const MARGINFI_PROGRAM_ID: Pubkey = pubkey!("MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA");
 pub const MAIN_MARGINFI_GROUP: Pubkey = pubkey!("4qp6Fx6tnZkY5Wropq9wUYgtFxXKwE6viZxFHg3rdAG8");
