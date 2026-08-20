@@ -1605,6 +1605,48 @@ mod tranche_tests {
     }
 
     #[test]
+    fn tranche_quotes_use_class_ratio_not_stored_share_price() {
+        // The class also caches a floored fixed-point `share_price`. Onchain
+        // deposit/withdraw planning never reads it — `shares_for_deposit` /
+        // `amount_for_shares` divide by `value` directly — and inverting the
+        // floored price over-quotes, exactly as it does for the regular class.
+        //
+        // Pick a class where floor(value * 1e6 / supply) == 1_000_000 while the
+        // true ratio is > 1, so the two disagree.
+        let supply = 1_000_000_000_000u64;
+        let value = 1_000_000_000_000u64 + 999_999;
+        let mut tranche = make_tranche_state();
+        tranche.senior.total_supply = supply;
+        tranche.senior.value = value;
+        tranche.senior.share_price = 1_000_000; // floored: looks like par
+        let mut amm = make_tranched_amm();
+        amm.tranche_state = Some(tranche);
+
+        let in_amount = 555_000_000u64;
+        let out = amm
+            .quote(&quote_params(USDC_MINT, SENIOR_MINT, in_amount, SwapMode::ExactIn))
+            .unwrap()
+            .out_amount;
+
+        let onchain = (in_amount as u128 * supply as u128 / value as u128) as u64;
+        let share_price_inverse = in_amount; // floor(in * 1e6 / 1_000_000)
+        assert_eq!(out, onchain);
+        assert!(share_price_inverse - out >= 500);
+
+        // Same on the redemption side: shares × value / supply, not × share_price.
+        let shares = 555_000_000u64;
+        let redeemed = amm
+            .quote(&quote_params(SENIOR_MINT, USDC_MINT, shares, SwapMode::ExactIn))
+            .unwrap()
+            .out_amount;
+        assert_eq!(
+            redeemed,
+            (shares as u128 * value as u128 / supply as u128) as u64
+        );
+        assert!(redeemed > shares);
+    }
+
+    #[test]
     fn tranche_deposit_into_empty_class_mints_one_to_one() {
         let mut tranche = make_tranche_state();
         tranche.junior.value = 0;
