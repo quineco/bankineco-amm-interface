@@ -1647,6 +1647,59 @@ mod tranche_tests {
     }
 
     #[test]
+    fn direction_comes_from_the_receipt_mints_side() {
+        // Both a tranche deposit and a tranche redemption have an input_mint
+        // that differs from the regular share mint, so direction must not be
+        // inferred by elimination against it.
+        let amm = make_tranched_amm();
+        let user = Pubkey::new_unique();
+
+        // Junior on the output side = deposit: fee-vault pair present.
+        let deposit = amm
+            .get_swap_and_account_metas(&swap_params(USDC_MINT, JUNIOR_MINT, user))
+            .unwrap()
+            .account_metas;
+        // Junior on the input side = withdraw: fee-vault pair absent.
+        let withdraw = amm
+            .get_swap_and_account_metas(&swap_params(JUNIOR_MINT, USDC_MINT, user))
+            .unwrap()
+            .account_metas;
+        assert_eq!(deposit.len(), 15);
+        assert_eq!(withdraw.len(), 13);
+
+        // And the quotes disagree, as they must: a deposit takes mint_fee_bps
+        // (0 here) while a junior redemption takes early_unstake_fee_bps.
+        assert_eq!(
+            amm.quote(&quote_params(USDC_MINT, JUNIOR_MINT, 100_000_000, SwapMode::ExactIn))
+                .unwrap()
+                .fee_amount,
+            0
+        );
+        assert_eq!(
+            amm.quote(&quote_params(JUNIOR_MINT, USDC_MINT, 50_000_000, SwapMode::ExactIn))
+                .unwrap()
+                .fee_amount,
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn tranche_to_tranche_swap_is_rejected() {
+        // Neither receipt mint is a vault holding, so there is no asset leg.
+        let amm = make_tranched_amm();
+        assert!(amm
+            .quote(&quote_params(JUNIOR_MINT, SENIOR_MINT, 1_000_000, SwapMode::ExactIn))
+            .is_err());
+        assert!(amm
+            .get_swap_and_account_metas(&swap_params(
+                JUNIOR_MINT,
+                SENIOR_MINT,
+                Pubkey::new_unique()
+            ))
+            .is_err());
+    }
+
+    #[test]
     fn senior_withdraw_is_fee_free() {
         let amm = make_tranched_amm();
         let quote = amm
